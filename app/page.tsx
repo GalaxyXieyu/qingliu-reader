@@ -22,6 +22,9 @@ import {
   CornersOut,
   Heart,
   LockKey,
+  Key,
+  Copy,
+  Trash,
   MagnifyingGlass,
   Password,
   PaperPlaneTilt,
@@ -60,7 +63,7 @@ type PublicProfile = {
   messages: ProfileMessage[];
 };
 type Notification = { id: number; type: "annotation_reply" | "profile_message" | "profile_like"; actorUserId: number; actorNickname: string; actorAvatarUrl: string | null; annotationId: number | null; itemId: number | null; profileMessageId: number | null; isRead: number | boolean; createdAt: string };
-type DeskView = "today" | "discover" | "annotations" | "leaderboard" | "profile";
+type DeskView = "today" | "discover" | "annotations" | "leaderboard" | "profile" | "settings";
 
 const blank: Dashboard = { sources: [], items: [], totalItems: 0, imports: [], idea: null, itemsLoaded: false, user: null };
 const SOURCE_PANE_PREFERENCE = "rss-ai-source-pane-collapsed";
@@ -612,6 +615,10 @@ export function DeskApp({ initialView = "today" }: { initialView?: DeskView }) {
   const [authConfirm, setAuthConfirm] = useState("");
   const [authNickname, setAuthNickname] = useState("");
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [apiTokens, setApiTokens] = useState<Array<{ id: number; name: string; createdAt: string; lastUsedAt: string | null }>>([]);
+  const [newTokenName, setNewTokenName] = useState("");
+  const [freshToken, setFreshToken] = useState<{ name: string; token: string } | null>(null);
+  const [tokenCopied, setTokenCopied] = useState(false);
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [notificationsLoading, setNotificationsLoading] = useState(false);
@@ -737,6 +744,7 @@ export function DeskApp({ initialView = "today" }: { initialView?: DeskView }) {
 
   function navigate(next: DeskView) {
     setView(next);
+    if (next === "settings") void loadApiTokens();
     if (next !== "discover") setMobileSourcePaneOpen(false);
     setUserMenuOpen(false);
     setNotificationOpen(false);
@@ -1224,6 +1232,39 @@ export function DeskApp({ initialView = "today" }: { initialView?: DeskView }) {
     finally { setBusy(""); }
   }
 
+  async function loadApiTokens() {
+    try {
+      const res = await jsonRequest<{ tokens: typeof apiTokens }>("/api/tokens", { cache: "no-store" });
+      setApiTokens(res.tokens || []);
+    } catch (error) { setNotice(error instanceof Error ? error.message : "读取密钥失败"); }
+  }
+
+  async function createApiToken(event: FormEvent) {
+    event.preventDefault();
+    setBusy("token-create"); setNotice(""); setFreshToken(null); setTokenCopied(false);
+    try {
+      const res = await post<{ name: string; token: string }>("/api/tokens", { name: newTokenName || "新设备" });
+      setFreshToken({ name: res.name, token: res.token });
+      setNewTokenName("");
+      await loadApiTokens();
+    } catch (error) { setNotice(error instanceof Error ? error.message : "创建密钥失败"); }
+    finally { setBusy(null); }
+  }
+
+  async function revokeApiToken(id: number) {
+    setBusy(`token-${id}`); setNotice("");
+    try {
+      await fetch("/api/tokens", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) });
+      await loadApiTokens();
+    } catch (error) { setNotice(error instanceof Error ? error.message : "撤销失败"); }
+    finally { setBusy(null); }
+  }
+
+  function copyFreshToken() {
+    if (!freshToken) return;
+    navigator.clipboard?.writeText(freshToken.token).then(() => { setTokenCopied(true); setTimeout(() => setTokenCopied(false), 2000); }).catch(() => {});
+  }
+
   async function logout() {
     setBusy("logout");
     try {
@@ -1613,7 +1654,7 @@ export function DeskApp({ initialView = "today" }: { initialView?: DeskView }) {
             </div>}
           </div>
           <button className={`global-user ${view === "profile" && profileData?.isOwner ? "active" : ""} ${unreadNotificationCount ? "has-unread" : ""}`} aria-expanded={userMenuOpen} onClick={() => { setUserMenuOpen((open) => !open); setNotificationOpen(false); }}><Avatar user={data.user} size="small" /><span>{data.user.nickname}</span><CaretDown size={11} weight="bold" aria-hidden="true" /></button>
-          {userMenuOpen && <div className="user-menu global-user-menu" role="menu"><button role="menuitem" onClick={() => openProfile(data.user!.id)}><User size={15} />个人主页</button><button role="menuitem" onClick={() => { setPasswordOpen(true); setUserMenuOpen(false); }}><Password size={15} />修改密码</button><button role="menuitem" disabled={busy === "logout"} onClick={logout}><SignOut size={15} />退出登录</button></div>}
+          {userMenuOpen && <div className="user-menu global-user-menu" role="menu"><button role="menuitem" onClick={() => openProfile(data.user!.id)}><User size={15} />个人主页</button><button role="menuitem" onClick={() => { navigate("settings"); setUserMenuOpen(false); }}><Key size={15} />API 密钥</button><button role="menuitem" onClick={() => { setPasswordOpen(true); setUserMenuOpen(false); }}><Password size={15} />修改密码</button><button role="menuitem" disabled={busy === "logout"} onClick={logout}><SignOut size={15} />退出登录</button></div>}
         </div>
         : <button className="global-login" onClick={() => openAuth("login")}><SignIn size={16} />登录</button>}
     </header>}
@@ -1856,6 +1897,38 @@ export function DeskApp({ initialView = "today" }: { initialView?: DeskView }) {
             {profileData.messages.length === 0 ? <div className="profile-section-empty compact"><div><strong>还没有公开留言</strong><p>第一条留言会出现在这里。</p></div></div>
               : <div className="profile-message-list">{profileData.messages.map((message) => <article key={message.id}><button className="avatar-link" type="button" aria-label={`查看 ${message.nickname} 的主页`} onClick={() => openProfile(message.authorUserId)}><Avatar user={message} size="normal" /></button><div><button className="message-author-link" type="button" onClick={() => openProfile(message.authorUserId)}>{message.nickname}</button><time>{annotationWhen(message.createdAt)}</time><p>{message.body}</p></div></article>)}</div>}
           </section>
+          </div>
+        </div>}
+    </section>}
+
+    {view === "settings" && <section className="full-view settings-view" id="view-content">
+      {!data.user ? <div className="profile-card signed-out"><Key size={28} weight="duotone" /><h2>登录后管理 API 密钥</h2><p>API 密钥让你在命令行、其他电脑上免密码读取订阅与选题。</p><button className="primary-button" onClick={() => openAuth("login")}>登录 / 注册</button></div>
+        : <div className="settings-shell">
+          <header className="profile-page-heading"><div><small>账号设置</small><h1>API 密钥</h1></div></header>
+          <p className="settings-intro">API 密钥用于 <code>topics</code> 命令行工具和其他设备免密码登录。每台设备建议单独生成一枚，丢失或不用时随时撤销，不影响其它设备。</p>
+
+          <form className="token-create-form" onSubmit={createApiToken}>
+            <input value={newTokenName} maxLength={40} placeholder="给这枚密钥起个名字，如 workbuddy" onChange={(event) => setNewTokenName(event.target.value)} />
+            <button className="primary-button" disabled={busy === "token-create"}>{busy === "token-create" ? "生成中…" : <><Plus size={15} weight="bold" />生成新密钥</>}</button>
+          </form>
+
+          {freshToken && <div className="token-fresh" role="status">
+            <div className="token-fresh-head"><Key size={16} weight="fill" /><strong>「{freshToken.name}」已生成 —— 只显示这一次，请立即复制</strong></div>
+            <div className="token-fresh-value"><code>{freshToken.token}</code><button type="button" className="token-copy" onClick={copyFreshToken}><Copy size={14} weight="bold" />{tokenCopied ? "已复制" : "复制"}</button></div>
+            <div className="token-fresh-hint">目标设备执行：<code>topics login --token {freshToken.token.slice(0, 16)}…</code></div>
+          </div>}
+
+          <div className="token-list">
+            {apiTokens.length === 0 ? <div className="token-empty">还没有 API 密钥。生成一枚后即可在其他设备上用它登录。</div>
+              : apiTokens.map((token) => <div className="token-row" key={token.id}>
+                <div className="token-row-main"><Key size={15} weight="duotone" /><div><strong>{token.name}</strong><small>创建于 {when(token.createdAt, true)} · {token.lastUsedAt ? `最近使用 ${when(token.lastUsedAt, true)}` : "尚未使用"}</small></div></div>
+                <button className="token-revoke danger" disabled={busy === `token-${token.id}`} onClick={() => revokeApiToken(token.id)}><Trash size={14} />撤销</button>
+              </div>)}
+          </div>
+
+          <div className="settings-install">
+            <h2>在新设备上安装命令行</h2>
+            <pre><code>{`curl -fsSL https://topic.aigalaxy.top/cli/topics -o ~/bin/topics\nchmod +x ~/bin/topics\ntopics login --token <上面生成的密钥>`}</code></pre>
           </div>
         </div>}
     </section>}
