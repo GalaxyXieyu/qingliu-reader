@@ -738,3 +738,5 @@ button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible 
 .settings-install h2 { font-size: 15px; margin: 0 0 10px; color: var(--ink); }
 .settings-install pre { background: var(--canvas); border: 1px solid var(--line); border-radius: var(--r-md); padding: 14px 16px; overflow-x: auto; }
 .settings-install pre code { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; line-height: 1.8; color: var(--ink); }
+.settings-install-note { color: var(--muted); font-size: 12px; line-height: 1.7; margin: 8px 0 0; }
+.settings-install-note code { background: var(--canvas); padding: 1px 5px; border-radius: 4px; word-break: break-all; }
