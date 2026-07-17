@@ -88,6 +88,8 @@ export function retryablePartialImport(partialImport, message) {
 const metadataProbe = `
 import html, importlib.util, json, re, sys
 module_path, url = sys.argv[1], sys.argv[2]
+import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(module_path)))
 spec = importlib.util.spec_from_file_location("rss_ai_wechat_downloader", module_path)
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module
@@ -128,10 +130,13 @@ async function downloadSubmittedArticle(url, requestId) {
   if (!downloaded.output_dir) throw new Error("没有从这篇文章识别到公众号作者");
   const articles = JSON.parse(await readFile(path.join(downloaded.output_dir, "articles.json"), "utf8"));
   const first = articles?.[0] || {};
-  const accountName = String(first.account || "").trim();
-  if (!accountName) throw new Error("没有从这篇文章识别到公众号作者");
-  const articleKey = String(first.article_id || "").trim();
-  if (!articleKey) throw new Error("没有从这篇文章生成稳定标识");
+  let accountName = String(first.account || "").trim();
+  if (!accountName) {
+    const probed = inspectWechatArticle(url, "");
+    accountName = String(probed.accountName || "").trim();
+  }
+  if (!accountName) accountName = "未命名公众号";
+  const articleKey = String(first.article_id || first.msgid || "").trim() || `url-${Buffer.from(url).toString("base64url").slice(0, 24)}`;
   return { outputDir: String(downloaded.output_dir), accountName, articleKey };
 }
 
@@ -297,7 +302,7 @@ async function processPendingRequests() {
       await request("/api/import-queue", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: task.id, status: "pending", stage: "retrying", error: message.slice(0, 500) }),
+        body: JSON.stringify({ id: task.id, status: "failed", stage: "failed", error: message.slice(0, 500) }),
       }).catch(() => undefined);
       failed += 1;
     }
