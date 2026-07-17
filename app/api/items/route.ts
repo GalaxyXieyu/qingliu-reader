@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { assertSameOrigin, authErrorResponse, getSessionUser, requireSessionUser } from "../../../lib/auth";
 import { captureLink, getItemDetail, importWechatArticles, listSourceItems, markItemRead, requestSubscription, updateItem } from "../../../lib/store";
 import { requireImportAccess } from "../_access";
+import { importTweets } from "../../../lib/topics";
 
 export async function GET(request: Request) {
   try {
@@ -19,7 +20,13 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { action: "capture" | "read" | "mark-read" | "save" | "import-wechat" | "request-source"; id?: number; url?: string; title?: string; query?: string; requestId?: number; accountKey?: string; accountName?: string; avatarUrl?: string; articles?: Array<{ title: string; url: string; excerpt?: string; contentMarkdown?: string; author?: string; publishedAt?: string }> };
+    const body = await request.json() as { action: "capture" | "read" | "mark-read" | "save" | "import-wechat" | "import-tweets" | "request-source"; id?: number; url?: string; title?: string; query?: string; requestId?: number; accountKey?: string; accountName?: string; avatarUrl?: string; articles?: Array<{ title: string; url: string; excerpt?: string; contentMarkdown?: string; author?: string; publishedAt?: string }> };
+    if (body.action === "import-tweets") {
+      const denied = requireImportAccess(request, env);
+      if (denied) return denied;
+      const b = body as unknown as { author?: string; handle?: string; tweets?: Array<{ url: string; text: string; publishedAt?: string; heat?: string }> };
+      return Response.json({ added: await importTweets(env, b.author ?? "", b.handle ?? "", b.tweets ?? []) });
+    }
     if (body.action === "import-wechat") {
       const denied = requireImportAccess(request, env);
       if (denied) return denied;

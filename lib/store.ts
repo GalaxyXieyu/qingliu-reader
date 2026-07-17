@@ -7,7 +7,7 @@ import { readXArticles, readXPost, readXProfile, xPostAddress, xProfileAddress }
 export type AppEnv = { DB: D1Database; AI?: { run: (model: string, input: unknown) => Promise<unknown> } };
 const now = () => new Date().toISOString();
 const day = () => new Date().toISOString().slice(0, 10);
-const SCHEMA_VERSION = "2026-07-17.1";
+const SCHEMA_VERSION = "2026-07-17.2";
 const schemaReady = new WeakMap<object, Promise<void>>();
 
 async function initializeSchema(db: D1Database) {
@@ -17,6 +17,10 @@ async function initializeSchema(db: D1Database) {
     db.prepare("CREATE TABLE IF NOT EXISTS auth_sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS auth_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, attempt_key TEXT NOT NULL, action TEXT NOT NULL, succeeded INTEGER NOT NULL DEFAULT 0, attempted_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS api_tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_used_at TEXT, FOREIGN KEY(user_id) REFERENCES users(id))"),
+    db.prepare("CREATE TABLE IF NOT EXISTS eval_profiles (id INTEGER PRIMARY KEY AUTOINCREMENT, version INTEGER NOT NULL, content TEXT NOT NULL, note TEXT, is_active INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS item_evaluations (item_id INTEGER PRIMARY KEY, heat INTEGER NOT NULL DEFAULT 0, match_score INTEGER NOT NULL DEFAULT 0, feasibility INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0, verdict TEXT NOT NULL, hkr TEXT, model TEXT, created_at TEXT NOT NULL, FOREIGN KEY(item_id) REFERENCES items(id))"),
+    db.prepare("CREATE TABLE IF NOT EXISTS topics (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, angle TEXT NOT NULL, reason TEXT, platform TEXT, content_type TEXT, heat INTEGER, match_score INTEGER, feasibility INTEGER, total INTEGER NOT NULL DEFAULT 0, hkr TEXT, status TEXT NOT NULL DEFAULT 'candidate', item_ids TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS topics_status_idx ON topics(status, total DESC, id DESC)"),
     db.prepare("CREATE TABLE IF NOT EXISTS sources (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL DEFAULT 'rss', category TEXT, name TEXT NOT NULL, url TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL DEFAULT 1, last_synced_at TEXT, last_error TEXT, avatar_url TEXT, contributor_user_id INTEGER, created_at TEXT NOT NULL, FOREIGN KEY(contributor_user_id) REFERENCES users(id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, kind TEXT NOT NULL, title TEXT NOT NULL, original_excerpt TEXT, content_markdown TEXT, author TEXT, translated_title TEXT, translated_excerpt TEXT, url TEXT NOT NULL UNIQUE, published_at TEXT, language TEXT, topic TEXT, status TEXT NOT NULL DEFAULT 'pending', is_read INTEGER NOT NULL DEFAULT 0, is_saved INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS sync_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, item_count INTEGER NOT NULL DEFAULT 0, error TEXT)"),

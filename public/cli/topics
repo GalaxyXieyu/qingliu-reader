@@ -21,7 +21,13 @@ topics — 内容选题中心的多端 CLI（云端命令集 P1）
   topics logout [--revoke]          # 退出（--revoke 同时撤销服务端 Key）
   topics config                     # 查看当前配置
 
-选题库命令（P2 上线）: topics review / approve / prep ...
+选题库命令:
+  topics review [--all|--status approved]   # 候选选题（AI 评估产出，总分≥6）
+  topics approve <id...> / skip <id...>     # 拍板入选 / 忽略
+  topics profile                            # 查看评估画像与提示词（当前版本）
+  topics profile set --file 文件.json       # 上传新版提示词（自动版本+1）
+  topics profile versions                   # 版本历史
+
 工作站命令（绑定采集机）: 见 topic.py（后续并入）
 """
 
@@ -221,6 +227,59 @@ def cmd_open(args):
     print(body)
 
 
+def cmd_review(args):
+    status = "" if args.all else (args.status or "candidate")
+    rows = request("/api/topics" + (f"?status={status}" if status else "")).get("topics", [])
+    if not rows:
+        print("（没有匹配的选题——评估器每 6 小时跑一轮）")
+        return
+    mark = {"candidate": "🟡", "approved": "⭐", "skipped": "🚫"}
+    for t in rows:
+        print(f"[{t['id']:>3}] {mark.get(t['status'],'·')} {t['total']}分 · {t['title']}")
+        print(f"      角度: {t['angle']}")
+        extra = " · ".join(x for x in [t.get('platform'), t.get('contentType'), t.get('hkr')] if x)
+        if extra:
+            print(f"      {extra}")
+        if t.get("reason"):
+            print(f"      理由: {t['reason']}")
+        print()
+    print(f"共 {len(rows)} 条 · topics approve <id> 入选 · topics skip <id> 忽略")
+
+
+def _set_topic(ids, action, label):
+    for i in ids:
+        request("/api/topics", "POST", {"action": action, "id": int(i)})
+        print(f"{label}: #{i}")
+
+
+def cmd_approve(args):
+    _set_topic(args.ids, "approve", "⭐ 已入选")
+
+
+def cmd_skip(args):
+    _set_topic(args.ids, "skip", "🚫 已忽略")
+
+
+def cmd_profile(args):
+    if args.action == "versions":
+        for v in request("/api/eval-profile").get("versions", []):
+            act = "← 当前" if v.get("isActive") else ""
+            print(f"  v{v['version']}  {v['createdAt'][:16]}  {v.get('note') or ''} {act}")
+        return
+    if args.action == "set":
+        if not args.file:
+            sys.exit("用法: topics profile set --file 新配置.json （先用 topics profile > 当前.json 导出改）")
+        content = Path(args.file).read_text()
+        json.loads(content)
+        note = args.note or f"via cli"
+        r = request("/api/eval-profile", "POST", {"content": content, "note": note})
+        print(f"✅ 已保存为 v{r['version']} 并设为当前版本")
+        return
+    active = request("/api/eval-profile").get("active", {})
+    print(f"# 评估画像 v{active.get('version')} · {str(active.get('createdAt',''))[:16]} · {active.get('note') or ''}")
+    print(active.get("content", ""))
+
+
 def cmd_config(_):
     cfg = load_config()
     tok = cfg.get("token", "")
@@ -257,9 +316,24 @@ def main():
     op = sub.add_parser("open")
     op.add_argument("id", type=int)
 
+    rv = sub.add_parser("review")
+    rv.add_argument("--all", action="store_true")
+    rv.add_argument("--status", choices=["candidate", "approved", "skipped"])
+
+    apv = sub.add_parser("approve")
+    apv.add_argument("ids", nargs="+")
+    sk = sub.add_parser("skip")
+    sk.add_argument("ids", nargs="+")
+
+    pf = sub.add_parser("profile")
+    pf.add_argument("action", nargs="?", default="show", choices=["show", "set", "versions"])
+    pf.add_argument("--file")
+    pf.add_argument("--note")
+
     args = ap.parse_args()
     {"login": cmd_login, "logout": cmd_logout, "whoami": cmd_whoami, "config": cmd_config,
-     "token": cmd_token, "inbox": cmd_inbox, "open": cmd_open}[args.cmd](args)
+     "token": cmd_token, "inbox": cmd_inbox, "open": cmd_open, "review": cmd_review,
+     "approve": cmd_approve, "skip": cmd_skip, "profile": cmd_profile}[args.cmd](args)
 
 
 if __name__ == "__main__":
