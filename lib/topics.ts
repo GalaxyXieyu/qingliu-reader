@@ -102,10 +102,10 @@ export async function setTopicStatus(env: Env, id: number, status: string) {
 export async function importTweets(env: Env, author: string, handle: string,
   tweets: Array<{ url: string; text: string; publishedAt?: string; heat?: string }>) {
   await ensureSchema(env.DB);
-  const sourceUrl = "x-tweets://" + (handle || author);
+  const sourceUrl = "x-tweets://" + (handle || author).toLowerCase();
   let source = await env.DB.prepare("SELECT id FROM sources WHERE url = ?").bind(sourceUrl).first<{ id: number }>();
   if (!source) {
-    await env.DB.prepare("INSERT INTO sources (kind, category, name, url, enabled, created_at) VALUES ('x', 'ai', ?, ?, 1, ?)")
+    await env.DB.prepare("INSERT INTO sources (kind, category, name, url, enabled, created_at) VALUES ('x-tweet', 'ai', ?, ?, 1, ?)")
       .bind((author || handle) + "·推文", sourceUrl, now()).run();
     source = await env.DB.prepare("SELECT id FROM sources WHERE url = ?").bind(sourceUrl).first<{ id: number }>();
   }

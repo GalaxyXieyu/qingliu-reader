@@ -7,7 +7,7 @@ import { readXArticles, readXPost, readXProfile, xPostAddress, xProfileAddress }
 export type AppEnv = { DB: D1Database; AI?: { run: (model: string, input: unknown) => Promise<unknown> } };
 const now = () => new Date().toISOString();
 const day = () => new Date().toISOString().slice(0, 10);
-const SCHEMA_VERSION = "2026-07-17.2";
+const SCHEMA_VERSION = "2026-07-17.3";
 const schemaReady = new WeakMap<object, Promise<void>>();
 
 async function initializeSchema(db: D1Database) {
@@ -21,6 +21,10 @@ async function initializeSchema(db: D1Database) {
     db.prepare("CREATE TABLE IF NOT EXISTS item_evaluations (item_id INTEGER PRIMARY KEY, heat INTEGER NOT NULL DEFAULT 0, match_score INTEGER NOT NULL DEFAULT 0, feasibility INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0, verdict TEXT NOT NULL, hkr TEXT, model TEXT, created_at TEXT NOT NULL, FOREIGN KEY(item_id) REFERENCES items(id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS topics (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, angle TEXT NOT NULL, reason TEXT, platform TEXT, content_type TEXT, heat INTEGER, match_score INTEGER, feasibility INTEGER, total INTEGER NOT NULL DEFAULT 0, hkr TEXT, status TEXT NOT NULL DEFAULT 'candidate', item_ids TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE INDEX IF NOT EXISTS topics_status_idx ON topics(status, total DESC, id DESC)"),
+    db.prepare("UPDATE sources SET kind = 'x-tweet' WHERE url LIKE 'x-tweets://%'"),
+    db.prepare("UPDATE sources SET url = 'x-tweets://karpathy' WHERE url = 'x-tweets://Andrej Karpathy'"),
+    db.prepare("UPDATE sources SET url = 'x-tweets://sama' WHERE url = 'x-tweets://Sam Altman'"),
+    db.prepare("UPDATE sources SET url = 'x-tweets://simonw' WHERE url = 'x-tweets://Simon Willison'"),
     db.prepare("CREATE TABLE IF NOT EXISTS sources (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL DEFAULT 'rss', category TEXT, name TEXT NOT NULL, url TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL DEFAULT 1, last_synced_at TEXT, last_error TEXT, avatar_url TEXT, contributor_user_id INTEGER, created_at TEXT NOT NULL, FOREIGN KEY(contributor_user_id) REFERENCES users(id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, kind TEXT NOT NULL, title TEXT NOT NULL, original_excerpt TEXT, content_markdown TEXT, author TEXT, translated_title TEXT, translated_excerpt TEXT, url TEXT NOT NULL UNIQUE, published_at TEXT, language TEXT, topic TEXT, status TEXT NOT NULL DEFAULT 'pending', is_read INTEGER NOT NULL DEFAULT 0, is_saved INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS sync_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, item_count INTEGER NOT NULL DEFAULT 0, error TEXT)"),
@@ -219,7 +223,11 @@ async function addXSource(env: AppEnv, value: string, contributorUserId: number 
 
   try {
     const added = await syncSource(env, source.id);
-    return { kind: "x" as const, id: source.id, name: profile.name, added, created: !existing, warning: "" };
+    const after = await env.DB.prepare("SELECT kind FROM sources WHERE id = ?").bind(source.id).first<{ kind: string }>();
+    const converted = !after || after.kind === "x-tweet";
+    return { kind: "x" as const, id: source.id, name: profile.name, added,
+      created: !existing,
+      warning: converted ? "该账号没有公开长文，已按「推文模式」收录：由采集端定时抓取其日常推文" : "" };
   } catch (error) {
     if (!existing) await deleteSource(env, source.id);
     throw error;
@@ -825,7 +833,23 @@ export async function syncSource(env: AppEnv, sourceId: number) {
       const username = xSourceUsername(source.url);
       if (!username) throw new Error("X 订阅地址不完整");
       entries = await readXArticles(username);
-      if (!entries.length) throw new Error("这个 X 账号目前没有公开的长文章");
+      if (!entries.length) {
+        const tweetUrl = "x-tweets://" + username.toLowerCase();
+        const clash = await env.DB.prepare("SELECT id FROM sources WHERE url = ? AND id != ?").bind(tweetUrl, source.id).first<{ id: number }>();
+        if (clash) {
+          await env.DB.batch([
+            env.DB.prepare("INSERT OR IGNORE INTO user_source_follows (user_id, source_id, created_at) SELECT user_id, ?, created_at FROM user_source_follows WHERE source_id = ?").bind(clash.id, source.id),
+            env.DB.prepare("DELETE FROM user_source_follows WHERE source_id = ?").bind(source.id),
+            env.DB.prepare("DELETE FROM sync_runs WHERE source_id = ?").bind(source.id),
+            env.DB.prepare("DELETE FROM sources WHERE id = ?").bind(source.id),
+          ]);
+        } else {
+          await env.DB.prepare("UPDATE sources SET kind = 'x-tweet', url = ?, last_synced_at = ?, last_error = NULL WHERE id = ?")
+            .bind(tweetUrl, now(), source.id).run();
+        }
+        await env.DB.prepare("UPDATE sync_runs SET finished_at = ?, item_count = 0 WHERE id = ?").bind(now(), Number(sync.meta.last_row_id)).run();
+        return 0;
+      }
       itemKind = "x_article";
     } else {
       const { response, text: xml } = await fetchPublicText(source.url, { accept: FEED_ACCEPT, maxBytes: 1_500_000 });
