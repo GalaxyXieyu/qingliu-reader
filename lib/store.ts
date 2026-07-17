@@ -7,7 +7,7 @@ import { readXArticles, readXPost, readXProfile, xPostAddress, xProfileAddress }
 export type AppEnv = { DB: D1Database; AI?: { run: (model: string, input: unknown) => Promise<unknown> } };
 const now = () => new Date().toISOString();
 const day = () => new Date().toISOString().slice(0, 10);
-const SCHEMA_VERSION = "2026-07-16.2";
+const SCHEMA_VERSION = "2026-07-17.1";
 const schemaReady = new WeakMap<object, Promise<void>>();
 
 async function initializeSchema(db: D1Database) {
@@ -16,6 +16,7 @@ async function initializeSchema(db: D1Database) {
     db.prepare("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, account TEXT NOT NULL, account_normalized TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, password_salt TEXT NOT NULL, password_iterations INTEGER NOT NULL DEFAULT 100000, nickname TEXT NOT NULL, bio TEXT NOT NULL DEFAULT '', avatar_key TEXT, role TEXT NOT NULL DEFAULT 'user', created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS auth_sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS auth_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT, attempt_key TEXT NOT NULL, action TEXT NOT NULL, succeeded INTEGER NOT NULL DEFAULT 0, attempted_at TEXT NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS api_tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_used_at TEXT, FOREIGN KEY(user_id) REFERENCES users(id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS sources (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL DEFAULT 'rss', category TEXT, name TEXT NOT NULL, url TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL DEFAULT 1, last_synced_at TEXT, last_error TEXT, avatar_url TEXT, contributor_user_id INTEGER, created_at TEXT NOT NULL, FOREIGN KEY(contributor_user_id) REFERENCES users(id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, kind TEXT NOT NULL, title TEXT NOT NULL, original_excerpt TEXT, content_markdown TEXT, author TEXT, translated_title TEXT, translated_excerpt TEXT, url TEXT NOT NULL UNIQUE, published_at TEXT, language TEXT, topic TEXT, status TEXT NOT NULL DEFAULT 'pending', is_read INTEGER NOT NULL DEFAULT 0, is_saved INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS sync_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, item_count INTEGER NOT NULL DEFAULT 0, error TEXT)"),

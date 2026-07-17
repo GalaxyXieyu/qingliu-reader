@@ -140,7 +140,44 @@ async function createSession(env: AuthEnv, userId: number) {
   return token;
 }
 
+async function apiTokenUser(env: AuthEnv, request: Request) {
+  const header = request.headers.get("authorization") || "";
+  const matched = /^Bearer\s+(topk_[a-f0-9]{32,64})$/.exec(header);
+  if (!matched) return null;
+  await ensureSchema(env.DB);
+  const tokenHash = await sha256(matched[1]);
+  const row = await env.DB.prepare("SELECT u.id, u.account, u.nickname, u.bio, u.avatar_key AS avatarKey, u.role, u.created_at AS createdAt FROM api_tokens t JOIN users u ON u.id = t.user_id WHERE t.token_hash = ?")
+    .bind(tokenHash).first<Record<string, unknown>>();
+  if (!row) return null;
+  await env.DB.prepare("UPDATE api_tokens SET last_used_at = ? WHERE token_hash = ?").bind(new Date().toISOString(), tokenHash).run();
+  return publicUser(row);
+}
+
+export async function createApiToken(env: AuthEnv, userId: number, name: string) {
+  await ensureSchema(env.DB);
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  const token = "topk_" + Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  const cleanName = (name || "cli").trim().slice(0, 40) || "cli";
+  const createdAt = new Date().toISOString();
+  const result = await env.DB.prepare("INSERT INTO api_tokens (user_id, name, token_hash, created_at) VALUES (?, ?, ?, ?)")
+    .bind(userId, cleanName, await sha256(token), createdAt).run();
+  return { id: Number(result.meta.last_row_id), name: cleanName, token, createdAt };
+}
+
+export async function listApiTokens(env: AuthEnv, userId: number) {
+  await ensureSchema(env.DB);
+  const rows = await env.DB.prepare("SELECT id, name, created_at AS createdAt, last_used_at AS lastUsedAt FROM api_tokens WHERE user_id = ? ORDER BY id").bind(userId).all();
+  return rows.results;
+}
+
+export async function revokeApiToken(env: AuthEnv, userId: number, id: number) {
+  await ensureSchema(env.DB);
+  await env.DB.prepare("DELETE FROM api_tokens WHERE user_id = ? AND id = ?").bind(userId, id).run();
+}
+
 export async function getSessionUser(env: AuthEnv, request: Request) {
+  const viaToken = await apiTokenUser(env, request);
+  if (viaToken) return viaToken;
   const token = cookieValue(request, SESSION_COOKIE);
   if (!token) return null;
   await ensureSchema(env.DB);

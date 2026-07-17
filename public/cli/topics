@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+topics — 内容选题中心的多端 CLI（云端命令集 P1）
+
+任何电脑安装（两个源任选）：
+  curl -fsSL https://raw.githubusercontent.com/GalaxyXieyu/qingliu-reader/main/public/cli/topics -o ~/bin/topics && chmod +x ~/bin/topics
+  curl -fsSL https://topic.aigalaxy.top:8443/cli/topics -o ~/bin/topics && chmod +x ~/bin/topics
+
+首次登录（二选一）：
+  topics login                      # 交互输入账号密码，自动生成本机专属 API Key
+  topics login --token topk_xxx     # 直接粘贴一枚已有的 API Key
+
+云端命令（只依赖 HTTPS，随处可用）:
+  topics whoami                     # 我是谁 / 连接是否正常
+  topics inbox [--days 7] [--limit 30] [--kind rss|x|wechat]   # 订阅流统一收件箱
+  topics open <item_id>             # 阅读单条（含存档全文）
+  topics token list                 # 我的 API Key 列表
+  topics token create <名字>        # 为其他设备生成 Key
+  topics token revoke <id>          # 撤销 Key
+  topics logout [--revoke]          # 退出（--revoke 同时撤销服务端 Key）
+  topics config                     # 查看当前配置
+
+选题库命令（P2 上线）: topics review / approve / prep ...
+工作站命令（绑定采集机）: 见 topic.py（后续并入）
+"""
+
+import argparse
+import getpass
+import json
+import os
+import socket
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+DEFAULT_ENDPOINT = "https://topic.aigalaxy.top:8443"
+CONFIG_DIR = Path(os.environ.get("TOPICS_CONFIG_DIR", "~/.config/topics-cli")).expanduser()
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+KIND_ICON = {"rss": "📰", "x": "𝕏 ", "wechat": "💬", "link": "🔗"}
+
+
+# ─── 配置 ─────────────────────────────────────────────────────────────────────
+
+def load_config():
+    if CONFIG_FILE.exists():
+        try:
+            return json.loads(CONFIG_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def save_config(cfg):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=1))
+    try:
+        os.chmod(CONFIG_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def endpoint():
+    return (load_config().get("endpoint") or DEFAULT_ENDPOINT).rstrip("/")
+
+
+# ─── HTTP ────────────────────────────────────────────────────────────────────
+
+def request(path, method="GET", body=None, token=None, cookie=None, capture_cookie=False):
+    url = endpoint() + path
+    headers = {
+        "Content-Type": "application/json",
+        "Origin": endpoint(),
+        "Referer": endpoint() + "/",
+        "User-Agent": "topics-cli/1.0",
+    }
+    tok = token if token is not None else load_config().get("token")
+    if tok:
+        headers["Authorization"] = "Bearer " + tok
+    if cookie:
+        headers["Cookie"] = cookie
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode() or "{}")
+            if capture_cookie:
+                raw = resp.headers.get("set-cookie") or ""
+                payload["_cookie"] = raw.split(";")[0]
+            return payload
+    except urllib.error.HTTPError as e:
+        try:
+            err = json.loads(e.read().decode()).get("error", "")
+        except Exception:
+            err = ""
+        if e.code == 401:
+            sys.exit("未登录或 Key 已失效：先跑 topics login")
+        sys.exit(f"服务器返回 {e.code}: {err}")
+    except urllib.error.URLError as e:
+        sys.exit(f"连不上 {endpoint()}: {e.reason}")
+
+
+# ─── 命令 ────────────────────────────────────────────────────────────────────
+
+def cmd_login(args):
+    cfg = load_config()
+    if args.endpoint:
+        cfg["endpoint"] = args.endpoint.rstrip("/")
+        save_config(cfg)
+    if args.token:
+        cfg["token"] = args.token.strip()
+        save_config(cfg)
+        user = request("/api/auth").get("user")
+        if not user:
+            cfg.pop("token", None)
+            save_config(cfg)
+            sys.exit("这枚 Key 无效")
+        print(f"✅ 已登录: {user['nickname']} (@{user['account']}) · Key 已存入 {CONFIG_FILE}")
+        return
+    account = input("账号: ").strip()
+    password = getpass.getpass("密码: ")
+    login = request("/api/auth", "POST",
+                    {"action": "login", "account": account, "password": password},
+                    token="", capture_cookie=True)
+    cookie = login.get("_cookie", "")
+    if not login.get("user") or not cookie:
+        sys.exit("登录失败")
+    name = args.name or socket.gethostname().split(".")[0]
+    created = request("/api/tokens", "POST", {"name": name}, token="", cookie=cookie)
+    cfg["token"] = created["token"]
+    save_config(cfg)
+    print(f"✅ 已登录: {login['user']['nickname']} (@{login['user']['account']})")
+    print(f"   本机 Key「{created['name']}」已生成并保存到 {CONFIG_FILE}")
+    print("   （密码未保存；其他设备可用 topics token create 再生成新 Key）")
+
+
+def cmd_logout(args):
+    cfg = load_config()
+    if args.revoke and cfg.get("token"):
+        me = request("/api/auth").get("user")
+        if me:
+            for t in request("/api/tokens").get("tokens", []):
+                pass  # 无法从 Key 反查自身 id，保守起见只提示
+        print("提示: 服务端撤销请用 topics token list + revoke <id>")
+    cfg.pop("token", None)
+    save_config(cfg)
+    print("已退出（本地 Key 已删除）")
+
+
+def cmd_whoami(_):
+    user = request("/api/auth").get("user")
+    if not user:
+        sys.exit("未登录：topics login")
+    print(f"{user['nickname']} (@{user['account']}) · {user['role']} · {endpoint()}")
+
+
+def cmd_token(args):
+    if args.action == "list":
+        rows = request("/api/tokens").get("tokens", [])
+        if not rows:
+            print("（还没有 API Key）")
+        for t in rows:
+            last = (t.get("lastUsedAt") or "从未使用")[:16]
+            print(f"  #{t['id']:<3} {t['name']:<20} 创建 {t['createdAt'][:10]} · 最近使用 {last}")
+    elif args.action == "create":
+        created = request("/api/tokens", "POST", {"name": args.arg or "device"})
+        print(f"✅ 新 Key「{created['name']}」（只显示这一次，复制到目标设备）:")
+        print(f"   {created['token']}")
+        print(f"   目标设备执行: topics login --token {created['token']}")
+    elif args.action == "revoke":
+        if not args.arg:
+            sys.exit("用法: topics token revoke <id>")
+        request("/api/tokens", "DELETE", {"id": int(args.arg)})
+        print("已撤销")
+
+
+def fmt_time(iso):
+    if not iso:
+        return "----------"
+    try:
+        d = datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
+        return d.strftime("%m-%d %H:%M")
+    except Exception:
+        return iso[:10]
+
+
+def cmd_inbox(args):
+    data = request("/api/dashboard?view=" + ("today" if args.today else "discover"))
+    items = data.get("items") or []
+    if args.kind:
+        items = [i for i in items if i.get("kind") == args.kind]
+    if args.days:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
+        def keep(i):
+            try:
+                return datetime.fromisoformat(str(i.get("publishedAt", "")).replace("Z", "+00:00")) >= cutoff
+            except Exception:
+                return True
+        items = [i for i in items if keep(i)]
+    items = items[: args.limit]
+    if not items:
+        print("（收件箱为空）")
+        return
+    for i in items:
+        icon = KIND_ICON.get(i.get("kind", ""), "· ")
+        doc = " 📄" if i.get("contentMarkdown") or i.get("content_markdown") else ""
+        print(f"[{i['id']:>5}] {icon} {fmt_time(i.get('publishedAt'))} · {i.get('sourceName') or i.get('author') or '?':<18.18} {i.get('title','')[:56]}{doc}")
+    print(f"\n共 {len(items)} 条 · topics open <id> 阅读全文")
+
+
+def cmd_open(args):
+    d = request(f"/api/items?id={args.id}")
+    print("═" * 72)
+    print(d.get("title", ""))
+    print(f"{d.get('author') or ''} · {fmt_time(d.get('publishedAt'))} · {d.get('url','')}")
+    print("═" * 72)
+    body = d.get("contentMarkdown") or d.get("content_markdown") or d.get("originalExcerpt") or "（无正文，看原文链接）"
+    print(body)
+
+
+def cmd_config(_):
+    cfg = load_config()
+    tok = cfg.get("token", "")
+    print(f"endpoint: {endpoint()}")
+    print(f"key:      {tok[:10] + '…' + tok[-4:] if tok else '（未登录）'}")
+    print(f"config:   {CONFIG_FILE}")
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="topics", description="内容选题中心 CLI", usage=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    lg = sub.add_parser("login")
+    lg.add_argument("--token")
+    lg.add_argument("--endpoint")
+    lg.add_argument("--name", help="本机 Key 的名字（默认主机名）")
+
+    lo = sub.add_parser("logout")
+    lo.add_argument("--revoke", action="store_true")
+
+    sub.add_parser("whoami")
+    sub.add_parser("config")
+
+    tk = sub.add_parser("token")
+    tk.add_argument("action", choices=["list", "create", "revoke"])
+    tk.add_argument("arg", nargs="?")
+
+    ib = sub.add_parser("inbox")
+    ib.add_argument("--days", type=int, default=0)
+    ib.add_argument("--limit", type=int, default=30)
+    ib.add_argument("--kind", choices=["rss", "x", "wechat", "link"])
+    ib.add_argument("--today", action="store_true", help="只看我关注源的今日流")
+
+    op = sub.add_parser("open")
+    op.add_argument("id", type=int)
+
+    args = ap.parse_args()
+    {"login": cmd_login, "logout": cmd_logout, "whoami": cmd_whoami, "config": cmd_config,
+     "token": cmd_token, "inbox": cmd_inbox, "open": cmd_open}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    main()

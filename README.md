@@ -78,3 +78,15 @@ macOS 定时任务模板位于 `scripts/com.personal-intel-desk.wechat-sync.plis
 ## License
 
 [MIT](LICENSE)
+
+## topics CLI（多端命令行客户端）
+
+在任何电脑读取你的订阅流与选题库：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/GalaxyXieyu/qingliu-reader/main/public/cli/topics -o ~/bin/topics && chmod +x ~/bin/topics
+topics login        # 账号密码换本机 API Key（密码不落盘）；或 topics login --token topk_xxx
+topics inbox        # 统一收件箱；topics open <id> 阅读全文
+```
+
+API Key 在「个人 API」接口体系下管理（`topics token list/create/revoke`）。服务端对应实现：`app/api/tokens/`，所有 API 同时接受会话 Cookie 与 `Authorization: Bearer topk_*`。
