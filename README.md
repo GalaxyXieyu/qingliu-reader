@@ -86,7 +86,12 @@ macOS 定时任务模板位于 `scripts/com.personal-intel-desk.wechat-sync.plis
 ```bash
 curl -fsSL https://raw.githubusercontent.com/GalaxyXieyu/qingliu-reader/main/public/cli/topics -o ~/bin/topics && chmod +x ~/bin/topics
 topics login        # 账号密码换本机 API Key（密码不落盘）；或 topics login --token topk_xxx
-topics inbox        # 统一收件箱；topics open <id> 阅读全文
+topics inbox        # 统一收件箱；topics open <id> 阅读全文（默认标记已读）
+topics sources      # 订阅源总览；topics sources set <id> --interval 30m 调整每源拉取间隔
+topics sub <RSS地址|X主页|公众号文章链接> --category ai   # 一条命令添加订阅
+topics sub <公众号名>                                     # 按名字提交，采集端自动处理
+topics unsub <id>   # 取消关注；--delete 删除自己贡献的源
+topics imports      # 公众号导入队列进度
 ```
 
 API Key 在「个人 API」接口体系下管理（`topics token list/create/revoke`）。服务端对应实现：`app/api/tokens/`，所有 API 同时接受会话 Cookie 与 `Authorization: Bearer topk_*`。

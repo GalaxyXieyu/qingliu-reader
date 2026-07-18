@@ -11,15 +11,21 @@ topics — 内容选题中心的多端 CLI（云端命令集 P1）
   topics login                      # 交互输入账号密码，自动生成本机专属 API Key
   topics login --token topk_xxx     # 直接粘贴一枚已有的 API Key
 
-云端命令（只依赖 HTTPS，随处可用）:
-  topics whoami                     # 我是谁 / 连接是否正常
-  topics inbox [--days 7] [--limit 30] [--kind rss|x|wechat]   # 订阅流统一收件箱
-  topics open <item_id>             # 阅读单条（含存档全文）
-  topics token list                 # 我的 API Key 列表
-  topics token create <名字>        # 为其他设备生成 Key
-  topics token revoke <id>          # 撤销 Key
-  topics logout [--revoke]          # 退出（--revoke 同时撤销服务端 Key）
-  topics config                     # 查看当前配置
+订阅命令:
+  topics sources [--kind rss|x|x-tweet|wechat] [--followed] [--mine]   # 订阅源总览
+  topics sources set <源ID> --interval 30m|4h|1d|off   # 每源拉取间隔（off 恢复默认：X 每小时、RSS 每天）
+  topics sub <RSS地址|X主页|公众号文章链接> --category ai   # 一条命令添加订阅
+  topics sub <公众号或站点名>          # 按名字提交订阅请求，采集端自动处理
+  topics sub <源ID>                  # 关注站内已有的源
+  topics unsub <源ID> [--delete]     # 取消关注（--delete 删除自己贡献的源及其全部文章）
+  topics sync <源ID>                 # 手动拉取一次（仅限自己贡献的 RSS/X 源）
+  topics imports                    # 公众号导入队列进度
+
+阅读命令:
+  topics inbox [--days 7] [--limit 30] [--kind rss|x|wechat] [--unread] [--source 源ID]
+  topics open <文章ID> [--keep-unread] [--save]   # 阅读全文（默认标记已读）
+  topics save <文章ID>              # 收藏 / 取消收藏（开关）
+  topics capture <链接> [--title 标题]   # 把任意链接丢进收件箱
 
 选题库命令:
   topics review [--all|--status approved]   # 候选选题（AI 评估产出，总分≥6）
@@ -28,13 +34,16 @@ topics — 内容选题中心的多端 CLI（云端命令集 P1）
   topics profile set --file 文件.json       # 上传新版提示词（自动版本+1）
   topics profile versions                   # 版本历史
 
-工作站命令（绑定采集机）: 见 topic.py（后续并入）
+账号命令:
+  topics whoami / config / logout [--revoke]
+  topics token list / create <名字> / revoke <id>
 """
 
 import argparse
 import getpass
 import json
 import os
+import re
 import socket
 import sys
 import urllib.error
@@ -46,7 +55,8 @@ DEFAULT_ENDPOINT = "https://topic.aigalaxy.top:8443"
 CONFIG_DIR = Path(os.environ.get("TOPICS_CONFIG_DIR", "~/.config/topics-cli")).expanduser()
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
-KIND_ICON = {"rss": "📰", "x": "𝕏 ", "wechat": "💬", "link": "🔗"}
+KIND_ICON = {"rss": "📰", "x": "𝕏 ", "x-tweet": "𝕏 ", "wechat": "💬", "link": "🔗"}
+CATEGORY_LABEL = {"ai": "AI", "investment": "投资", "gaming": "游戏", "technology": "科技", "business": "商业", "product": "产品"}
 
 
 # ─── 配置 ─────────────────────────────────────────────────────────────────────
@@ -81,7 +91,7 @@ def request(path, method="GET", body=None, token=None, cookie=None, capture_cook
         "Content-Type": "application/json",
         "Origin": endpoint(),
         "Referer": endpoint() + "/",
-        "User-Agent": "topics-cli/1.0",
+        "User-Agent": "topics-cli/1.1",
     }
     tok = token if token is not None else load_config().get("token")
     if tok:
@@ -109,7 +119,7 @@ def request(path, method="GET", body=None, token=None, cookie=None, capture_cook
         sys.exit(f"连不上 {endpoint()}: {e.reason}")
 
 
-# ─── 命令 ────────────────────────────────────────────────────────────────────
+# ─── 账号 ────────────────────────────────────────────────────────────────────
 
 def cmd_login(args):
     cfg = load_config()
@@ -118,6 +128,7 @@ def cmd_login(args):
         save_config(cfg)
     if args.token:
         cfg["token"] = args.token.strip()
+        cfg.pop("token_id", None)  # 粘贴来的 Key 不知道服务端 ID
         save_config(cfg)
         user = request("/api/auth").get("user")
         if not user:
@@ -137,6 +148,7 @@ def cmd_login(args):
     name = args.name or socket.gethostname().split(".")[0]
     created = request("/api/tokens", "POST", {"name": name}, token="", cookie=cookie)
     cfg["token"] = created["token"]
+    cfg["token_id"] = created.get("id")
     save_config(cfg)
     print(f"✅ 已登录: {login['user']['nickname']} (@{login['user']['account']})")
     print(f"   本机 Key「{created['name']}」已生成并保存到 {CONFIG_FILE}")
@@ -146,12 +158,17 @@ def cmd_login(args):
 def cmd_logout(args):
     cfg = load_config()
     if args.revoke and cfg.get("token"):
-        me = request("/api/auth").get("user")
-        if me:
-            for t in request("/api/tokens").get("tokens", []):
-                pass  # 无法从 Key 反查自身 id，保守起见只提示
-        print("提示: 服务端撤销请用 topics token list + revoke <id>")
+        token_id = cfg.get("token_id")
+        if token_id:
+            try:
+                request("/api/tokens", "DELETE", {"id": int(token_id)})
+                print(f"服务端 Key #{token_id} 已撤销")
+            except SystemExit as e:
+                print(f"服务端撤销失败（{e}）· 可用 topics token list + revoke <id> 手动清理")
+        else:
+            print("这枚 Key 是手工粘贴的，不知道服务端 ID：用 topics token list + revoke <id> 撤销")
     cfg.pop("token", None)
+    cfg.pop("token_id", None)
     save_config(cfg)
     print("已退出（本地 Key 已删除）")
 
@@ -183,6 +200,138 @@ def cmd_token(args):
         print("已撤销")
 
 
+def cmd_config(_):
+    cfg = load_config()
+    tok = cfg.get("token", "")
+    print(f"endpoint: {endpoint()}")
+    print(f"key:      {tok[:10] + '…' + tok[-4:] if tok else '（未登录）'}")
+    print(f"config:   {CONFIG_FILE}")
+
+
+# ─── 订阅 ────────────────────────────────────────────────────────────────────
+
+def looks_like_url(value):
+    if re.match(r"^https?://", value, re.IGNORECASE):
+        return True
+    return bool(re.match(r"^(?:www\.)?[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?:/.*)?$", value))
+
+
+def parse_interval(text):
+    t = text.strip().lower()
+    if t in ("off", "default", "默认"):
+        return None
+    m = re.fullmatch(r"(\d+)\s*(m|min|h|d|分|分钟|小时|天)?", t)
+    if not m:
+        sys.exit("间隔格式: 数字+单位（m/h/d），例如 30m、4h、1d；off 恢复默认")
+    value = int(m.group(1))
+    unit = m.group(2) or "m"
+    minutes = value * (1440 if unit in ("d", "天") else 60 if unit in ("h", "小时") else 1)
+    if minutes < 15 or minutes > 10080:
+        sys.exit("间隔需在 15 分钟到 7 天之间")
+    return minutes
+
+
+def fmt_interval(minutes):
+    if not minutes:
+        return ""
+    m = int(minutes)
+    if m % 1440 == 0:
+        return f"{m // 1440}d"
+    if m % 60 == 0:
+        return f"{m // 60}h"
+    return f"{m}m"
+
+
+def cmd_sub(args):
+    target = args.target.strip()
+    if target.isdigit():
+        request("/api/sources", "POST", {"action": "follow", "id": int(target), "following": True})
+        print(f"✅ 已关注源 #{target} · topics inbox --source {target} 查看文章")
+        return
+    if not looks_like_url(target):
+        request("/api/items", "POST", {"action": "request-source", "query": target})
+        print(f"✅ 已提交订阅请求「{target}」，采集端会自动处理 · topics imports 看进度")
+        return
+    if args.category not in CATEGORY_LABEL:
+        sys.exit("添加订阅需要 --category，可选: " + " ".join(f"{k}({v})" for k, v in CATEGORY_LABEL.items()))
+    r = request("/api/sources", "POST", {"action": "add", "url": target, "category": args.category})
+    kind = r.get("kind")
+    if kind == "wechat":
+        print(f"✅ 公众号已进导入队列（任务 #{r.get('requestId')}）· topics imports 看进度")
+    elif kind == "article":
+        print(f"✅ 已收录这篇 X 文章（条目 #{r.get('id')}）· topics open {r.get('id')} 阅读")
+    else:
+        extra = f" · 首次抓到 {r.get('added')} 篇" if r.get("added") else ""
+        print(f"✅ 已订阅「{r.get('name')}」(#{r.get('id')}){extra}")
+        if r.get("warning"):
+            print(f"   ⚠️  {r['warning']}")
+
+
+def cmd_unsub(args):
+    if args.delete:
+        answer = input(f"⚠️  删除源 #{args.id} 会连同它的全部文章、批注一起删除，输入 yes 确认: ").strip().lower()
+        if answer != "yes":
+            sys.exit("已取消")
+        request("/api/sources", "POST", {"action": "delete", "id": args.id})
+        print(f"🗑  源 #{args.id} 已删除")
+        return
+    request("/api/sources", "POST", {"action": "follow", "id": args.id, "following": False})
+    print(f"已取消关注源 #{args.id}（源本身保留；自己贡献的源可用 --delete 删除）")
+
+
+def cmd_sources(args):
+    if args.action == "set":
+        if not args.id or not args.interval:
+            sys.exit("用法: topics sources set <源ID> --interval 30m|4h|1d|off")
+        minutes = parse_interval(args.interval)
+        request("/api/sources", "POST", {"action": "set-interval", "id": args.id, "minutes": minutes})
+        if minutes is None:
+            print(f"✅ 源 #{args.id} 已恢复默认节奏（X 每小时、RSS 每天）")
+        else:
+            print(f"✅ 源 #{args.id} 拉取间隔已设为每 {fmt_interval(minutes)}")
+        return
+    rows = request("/api/dashboard?view=discover").get("sources") or []
+    if args.kind:
+        rows = [s for s in rows if s.get("kind") == args.kind]
+    if args.followed:
+        rows = [s for s in rows if s.get("isFollowed")]
+    if args.mine:
+        rows = [s for s in rows if s.get("canManage")]
+    if not rows:
+        print("（没有匹配的订阅源）")
+        return
+    for s in rows:
+        icon = KIND_ICON.get(s.get("kind", ""), "· ")
+        marks = ("★" if s.get("isFollowed") else " ") + ("✎" if s.get("canManage") else " ")
+        cat = CATEGORY_LABEL.get(s.get("category") or "", "  ")
+        interval = fmt_interval(s.get("syncIntervalMinutes"))
+        interval = f" · 每{interval}" if interval else ""
+        state = "" if s.get("enabled") else " · ⏸ 已停用"
+        err = f" · ⚠️ {str(s.get('lastError'))[:36]}" if s.get("lastError") else ""
+        print(f"[{s['id']:>4}] {marks} {icon} {str(s.get('name', ''))[:22]:<22} {cat} · {s.get('itemCount', 0):>4} 篇 · 同步 {fmt_time(s.get('lastSyncedAt'))}{interval}{state}{err}")
+    print(f"\n共 {len(rows)} 个源 · ★=已关注 ✎=我贡献的 · topics sub/unsub <ID> 关注/取关 · sources set <ID> --interval 调节奏")
+
+
+def cmd_sync(args):
+    r = request("/api/sources", "POST", {"action": "sync", "id": args.id})
+    print(f"✅ 同步完成，新增 {r.get('added', 0)} 篇")
+
+
+def cmd_imports(_):
+    rows = request("/api/dashboard?view=discover").get("imports") or []
+    if not rows:
+        print("（没有进行中的公众号导入任务；完成超过 10 分钟的任务不再显示）")
+        return
+    status_icon = {"pending": "⏳", "completed": "✅", "failed": "❌"}
+    stage_label = {"queued": "排队中", "reading": "读取账号", "importing": "导入文章", "history": "补历史", "retrying": "重试中", "completed": "完成"}
+    for r in rows:
+        name = r.get("resultName") or r.get("query")
+        err = f" · {r['lastError']}" if r.get("lastError") else ""
+        print(f"[{r['id']:>3}] {status_icon.get(r.get('status'), '·')} {name} · {stage_label.get(r.get('stage'), r.get('stage'))} · 已导入 {r.get('itemCount', 0)} 篇{err}")
+
+
+# ─── 阅读 ────────────────────────────────────────────────────────────────────
+
 def fmt_time(iso):
     if not iso:
         return "----------"
@@ -194,10 +343,15 @@ def fmt_time(iso):
 
 
 def cmd_inbox(args):
-    data = request("/api/dashboard?view=" + ("today" if args.today else "discover"))
-    items = data.get("items") or []
+    if args.source:
+        items = request(f"/api/items?sourceId={args.source}").get("items") or []
+    else:
+        data = request("/api/dashboard?view=" + ("today" if args.today else "discover"))
+        items = data.get("items") or []
     if args.kind:
         items = [i for i in items if i.get("kind") == args.kind]
+    if args.unread:
+        items = [i for i in items if not i.get("isRead")]
     if args.days:
         cutoff = datetime.now(timezone.utc) - timedelta(days=args.days)
         def keep(i):
@@ -212,8 +366,9 @@ def cmd_inbox(args):
         return
     for i in items:
         icon = KIND_ICON.get(i.get("kind", ""), "· ")
+        read = "✓" if i.get("isRead") else " "
         doc = " 📄" if i.get("contentMarkdown") or i.get("content_markdown") else ""
-        print(f"[{i['id']:>5}] {icon} {fmt_time(i.get('publishedAt'))} · {i.get('sourceName') or i.get('author') or '?':<18.18} {i.get('title','')[:56]}{doc}")
+        print(f"[{i['id']:>5}] {read} {icon} {fmt_time(i.get('publishedAt'))} · {i.get('sourceName') or i.get('author') or '?':<18.18} {i.get('title', '')[:56]}{doc}")
     print(f"\n共 {len(items)} 条 · topics open <id> 阅读全文")
 
 
@@ -221,11 +376,39 @@ def cmd_open(args):
     d = request(f"/api/items?id={args.id}")
     print("═" * 72)
     print(d.get("title", ""))
-    print(f"{d.get('author') or ''} · {fmt_time(d.get('publishedAt'))} · {d.get('url','')}")
+    print(f"{d.get('author') or ''} · {fmt_time(d.get('publishedAt'))} · {d.get('url', '')}")
     print("═" * 72)
     body = d.get("contentMarkdown") or d.get("content_markdown") or d.get("originalExcerpt") or "（无正文，看原文链接）"
     print(body)
+    tail = []
+    if not args.keep_unread:
+        try:
+            request("/api/items", "POST", {"action": "mark-read", "id": args.id})
+            tail.append("✓ 已读")
+        except SystemExit:
+            pass  # 标记失败不影响阅读
+    if args.save:
+        request("/api/items", "POST", {"action": "save", "id": args.id})
+        tail.append("已取消收藏" if d.get("isSaved") else "⭐ 已收藏")
+    if tail:
+        print("\n· " + " · ".join(tail))
 
+
+def cmd_save(args):
+    request("/api/items", "POST", {"action": "save", "id": args.id})
+    print(f"✅ 条目 #{args.id} 收藏状态已切换（该命令是开关，再执行一次即撤销）")
+
+
+def cmd_capture(args):
+    body = {"action": "capture", "url": args.url}
+    if args.title:
+        body["title"] = args.title
+    r = request("/api/items", "POST", body)
+    ready = "全文已就绪" if r.get("contentReady") else "正文稍后由 AI 补全"
+    print(f"✅ 已存入收件箱 #{r.get('id')}（{ready}）· topics open {r.get('id')} 阅读")
+
+
+# ─── 选题库 ──────────────────────────────────────────────────────────────────
 
 def cmd_review(args):
     status = "" if args.all else (args.status or "candidate")
@@ -235,7 +418,7 @@ def cmd_review(args):
         return
     mark = {"candidate": "🟡", "approved": "⭐", "skipped": "🚫"}
     for t in rows:
-        print(f"[{t['id']:>3}] {mark.get(t['status'],'·')} {t['total']}分 · {t['title']}")
+        print(f"[{t['id']:>3}] {mark.get(t['status'], '·')} {t['total']}分 · {t['title']}")
         print(f"      角度: {t['angle']}")
         extra = " · ".join(x for x in [t.get('platform'), t.get('contentType'), t.get('hkr')] if x)
         if extra:
@@ -276,16 +459,8 @@ def cmd_profile(args):
         print(f"✅ 已保存为 v{r['version']} 并设为当前版本")
         return
     active = request("/api/eval-profile").get("active", {})
-    print(f"# 评估画像 v{active.get('version')} · {str(active.get('createdAt',''))[:16]} · {active.get('note') or ''}")
+    print(f"# 评估画像 v{active.get('version')} · {str(active.get('createdAt', ''))[:16]} · {active.get('note') or ''}")
     print(active.get("content", ""))
-
-
-def cmd_config(_):
-    cfg = load_config()
-    tok = cfg.get("token", "")
-    print(f"endpoint: {endpoint()}")
-    print(f"key:      {tok[:10] + '…' + tok[-4:] if tok else '（未登录）'}")
-    print(f"config:   {CONFIG_FILE}")
 
 
 def main():
@@ -307,14 +482,46 @@ def main():
     tk.add_argument("action", choices=["list", "create", "revoke"])
     tk.add_argument("arg", nargs="?")
 
+    sb = sub.add_parser("sub")
+    sb.add_argument("target", help="RSS 地址 / X 主页 / 公众号文章链接 / 公众号名 / 站内源ID")
+    sb.add_argument("--category", help="订阅分类: " + "/".join(CATEGORY_LABEL))
+
+    us = sub.add_parser("unsub")
+    us.add_argument("id", type=int)
+    us.add_argument("--delete", action="store_true", help="删除自己贡献的源（连同全部文章）")
+
+    sc = sub.add_parser("sources")
+    sc.add_argument("action", nargs="?", default="list", choices=["list", "set"])
+    sc.add_argument("id", nargs="?", type=int)
+    sc.add_argument("--kind", choices=["rss", "x", "x-tweet", "wechat"])
+    sc.add_argument("--followed", action="store_true", help="只看我关注的")
+    sc.add_argument("--mine", action="store_true", help="只看我贡献的")
+    sc.add_argument("--interval", help="拉取间隔: 30m/4h/1d，off 恢复默认")
+
+    sy = sub.add_parser("sync")
+    sy.add_argument("id", type=int)
+
+    sub.add_parser("imports")
+
     ib = sub.add_parser("inbox")
     ib.add_argument("--days", type=int, default=0)
     ib.add_argument("--limit", type=int, default=30)
     ib.add_argument("--kind", choices=["rss", "x", "wechat", "link"])
     ib.add_argument("--today", action="store_true", help="只看我关注源的今日流")
+    ib.add_argument("--unread", action="store_true", help="只看未读")
+    ib.add_argument("--source", type=int, help="只看某个源（源ID 见 topics sources）")
 
     op = sub.add_parser("open")
     op.add_argument("id", type=int)
+    op.add_argument("--keep-unread", action="store_true", help="阅读后不标记已读")
+    op.add_argument("--save", action="store_true", help="阅读后同时收藏")
+
+    sv = sub.add_parser("save")
+    sv.add_argument("id", type=int)
+
+    cp = sub.add_parser("capture")
+    cp.add_argument("url")
+    cp.add_argument("--title")
 
     rv = sub.add_parser("review")
     rv.add_argument("--all", action="store_true")
@@ -332,7 +539,9 @@ def main():
 
     args = ap.parse_args()
     {"login": cmd_login, "logout": cmd_logout, "whoami": cmd_whoami, "config": cmd_config,
-     "token": cmd_token, "inbox": cmd_inbox, "open": cmd_open, "review": cmd_review,
+     "token": cmd_token, "sub": cmd_sub, "unsub": cmd_unsub, "sources": cmd_sources,
+     "sync": cmd_sync, "imports": cmd_imports, "inbox": cmd_inbox, "open": cmd_open,
+     "save": cmd_save, "capture": cmd_capture, "review": cmd_review,
      "approve": cmd_approve, "skip": cmd_skip, "profile": cmd_profile}[args.cmd](args)
 
 

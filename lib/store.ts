@@ -7,7 +7,7 @@ import { readXArticles, readXPost, readXProfile, xPostAddress, xProfileAddress }
 export type AppEnv = { DB: D1Database; AI?: { run: (model: string, input: unknown) => Promise<unknown> } };
 const now = () => new Date().toISOString();
 const day = () => new Date().toISOString().slice(0, 10);
-const SCHEMA_VERSION = "2026-07-17.3";
+const SCHEMA_VERSION = "2026-07-17.4";
 const schemaReady = new WeakMap<object, Promise<void>>();
 
 async function initializeSchema(db: D1Database) {
@@ -25,7 +25,7 @@ async function initializeSchema(db: D1Database) {
     db.prepare("UPDATE sources SET url = 'x-tweets://karpathy' WHERE url = 'x-tweets://Andrej Karpathy'"),
     db.prepare("UPDATE sources SET url = 'x-tweets://sama' WHERE url = 'x-tweets://Sam Altman'"),
     db.prepare("UPDATE sources SET url = 'x-tweets://simonw' WHERE url = 'x-tweets://Simon Willison'"),
-    db.prepare("CREATE TABLE IF NOT EXISTS sources (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL DEFAULT 'rss', category TEXT, name TEXT NOT NULL, url TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL DEFAULT 1, last_synced_at TEXT, last_error TEXT, avatar_url TEXT, contributor_user_id INTEGER, created_at TEXT NOT NULL, FOREIGN KEY(contributor_user_id) REFERENCES users(id))"),
+    db.prepare("CREATE TABLE IF NOT EXISTS sources (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL DEFAULT 'rss', category TEXT, name TEXT NOT NULL, url TEXT NOT NULL UNIQUE, enabled INTEGER NOT NULL DEFAULT 1, last_synced_at TEXT, last_error TEXT, avatar_url TEXT, contributor_user_id INTEGER, sync_interval_minutes INTEGER, created_at TEXT NOT NULL, FOREIGN KEY(contributor_user_id) REFERENCES users(id))"),
     db.prepare("CREATE TABLE IF NOT EXISTS items (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER, kind TEXT NOT NULL, title TEXT NOT NULL, original_excerpt TEXT, content_markdown TEXT, author TEXT, translated_title TEXT, translated_excerpt TEXT, url TEXT NOT NULL UNIQUE, published_at TEXT, language TEXT, topic TEXT, status TEXT NOT NULL DEFAULT 'pending', is_read INTEGER NOT NULL DEFAULT 0, is_saved INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS sync_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, item_count INTEGER NOT NULL DEFAULT 0, error TEXT)"),
     db.prepare("CREATE TABLE IF NOT EXISTS ideas (id INTEGER PRIMARY KEY AUTOINCREMENT, day TEXT NOT NULL UNIQUE, headline TEXT NOT NULL, angle TEXT NOT NULL, source_item_ids TEXT NOT NULL, created_at TEXT NOT NULL)"),
@@ -66,6 +66,7 @@ async function initializeSchema(db: D1Database) {
   if (!sourceColumns.results.some((column) => column.name === "category")) await db.prepare("ALTER TABLE sources ADD COLUMN category TEXT").run();
   if (!sourceColumns.results.some((column) => column.name === "avatar_url")) await db.prepare("ALTER TABLE sources ADD COLUMN avatar_url TEXT").run();
   if (!sourceColumns.results.some((column) => column.name === "contributor_user_id")) await db.prepare("ALTER TABLE sources ADD COLUMN contributor_user_id INTEGER REFERENCES users(id)").run();
+  if (!sourceColumns.results.some((column) => column.name === "sync_interval_minutes")) await db.prepare("ALTER TABLE sources ADD COLUMN sync_interval_minutes INTEGER").run();
   await db.prepare("CREATE INDEX IF NOT EXISTS sources_contributor_idx ON sources(contributor_user_id, created_at)").run();
   const itemColumns = await db.prepare("PRAGMA table_info(items)").all<{ name: string }>();
   if (!itemColumns.results.some((column) => column.name === "content_markdown")) await db.prepare("ALTER TABLE items ADD COLUMN content_markdown TEXT").run();
@@ -119,7 +120,7 @@ async function backfillSourceCategories(db: D1Database) {
 export async function dashboard(env: AppEnv, userId: number | null = null) {
   await ensureSchema(env.DB);
   const [sourceRows, itemRows, totalRow, ideaRow, importRows] = await Promise.all([
-    env.DB.prepare("SELECT s.id, s.kind, s.category, s.name, s.url, s.enabled, s.last_synced_at AS lastSyncedAt, s.last_error AS lastError, s.avatar_url AS avatarUrl, s.contributor_user_id AS contributorUserId, COALESCE(u.nickname, '站点收录') AS contributorNickname, CASE WHEN s.contributor_user_id = ? THEN 1 ELSE 0 END AS canManage, CASE WHEN usf.user_id IS NULL THEN 0 ELSE 1 END AS isFollowed, (SELECT COUNT(*) FROM items i WHERE i.source_id = s.id) AS itemCount FROM sources s LEFT JOIN users u ON u.id = s.contributor_user_id LEFT JOIN user_source_follows usf ON usf.source_id = s.id AND usf.user_id = ? ORDER BY s.created_at DESC").bind(userId || -1, userId || -1).all(),
+    env.DB.prepare("SELECT s.id, s.kind, s.category, s.name, s.url, s.enabled, s.last_synced_at AS lastSyncedAt, s.last_error AS lastError, s.avatar_url AS avatarUrl, s.sync_interval_minutes AS syncIntervalMinutes, s.contributor_user_id AS contributorUserId, COALESCE(u.nickname, '站点收录') AS contributorNickname, CASE WHEN s.contributor_user_id = ? THEN 1 ELSE 0 END AS canManage, CASE WHEN usf.user_id IS NULL THEN 0 ELSE 1 END AS isFollowed, (SELECT COUNT(*) FROM items i WHERE i.source_id = s.id) AS itemCount FROM sources s LEFT JOIN users u ON u.id = s.contributor_user_id LEFT JOIN user_source_follows usf ON usf.source_id = s.id AND usf.user_id = ? ORDER BY s.created_at DESC").bind(userId || -1, userId || -1).all(),
     env.DB.prepare("SELECT i.id, i.source_id AS sourceId, i.kind, i.title, i.author, i.original_excerpt AS originalExcerpt, i.translated_title AS translatedTitle, i.translated_excerpt AS translatedExcerpt, i.url, i.published_at AS publishedAt, i.language, i.topic, i.status, COALESCE(uis.is_read, 0) AS isRead, COALESCE(uis.is_saved, 0) AS isSaved, s.name AS sourceName FROM items i LEFT JOIN sources s ON s.id = i.source_id LEFT JOIN user_item_states uis ON uis.item_id = i.id AND uis.user_id = ? ORDER BY CASE WHEN i.published_at IS NULL OR i.published_at = '' THEN 1 ELSE 0 END, i.published_at DESC, i.id DESC LIMIT 500").bind(userId || -1).all(),
     env.DB.prepare("SELECT COUNT(*) AS totalItems FROM items").first<{ totalItems: number }>(),
     env.DB.prepare("SELECT id, day, headline, angle, source_item_ids AS sourceItemIds FROM ideas WHERE day = ?").bind(day()).first(),
@@ -274,6 +275,21 @@ export async function setSourceFollowing(env: AppEnv, id: number, userId: number
 export async function setSourceEnabled(env: AppEnv, id: number, enabled: boolean) {
   await ensureSchema(env.DB);
   await env.DB.prepare("UPDATE sources SET enabled = ? WHERE id = ?").bind(enabled ? 1 : 0, id).run();
+}
+
+// Scheduler wakes every 15 minutes, so shorter intervals would never fire on time.
+export const MIN_SYNC_INTERVAL_MINUTES = 15;
+export const MAX_SYNC_INTERVAL_MINUTES = 7 * 24 * 60;
+
+export async function setSourceSyncInterval(env: AppEnv, id: number, minutes: number | null) {
+  await ensureSchema(env.DB);
+  if (minutes !== null && (!Number.isInteger(minutes) || minutes < MIN_SYNC_INTERVAL_MINUTES || minutes > MAX_SYNC_INTERVAL_MINUTES)) {
+    throw new Error("拉取间隔需在 15 分钟到 7 天之间，或传 null 恢复默认节奏");
+  }
+  const source = await env.DB.prepare("SELECT kind FROM sources WHERE id = ?").bind(id).first<{ kind: string }>();
+  if (!source) throw new Error("这个订阅源不存在");
+  if (source.kind !== "rss" && source.kind !== "x") throw new Error("公众号与推文源由采集端更新，云端不支持配置拉取间隔");
+  await env.DB.prepare("UPDATE sources SET sync_interval_minutes = ? WHERE id = ?").bind(minutes, id).run();
 }
 
 export async function deleteSource(env: AppEnv, id: number) {
@@ -877,6 +893,16 @@ export async function syncSource(env: AppEnv, sourceId: number) {
 export async function syncSourcesByKind(env: AppEnv, kind: "rss" | "x") {
   await ensureSchema(env.DB);
   const rows = await env.DB.prepare("SELECT id FROM sources WHERE enabled = 1 AND kind = ? ORDER BY id LIMIT 30").bind(kind).all<{ id: number }>();
+  const results = await Promise.allSettled(rows.results.map((row) => syncSource(env, row.id)));
+  return results.filter((result) => result.status === "fulfilled").reduce((count, result) => count + (result as PromiseFulfilledResult<number>).value, 0);
+}
+
+// Sources without a custom interval keep the historical cadence: X hourly, RSS daily.
+export async function syncDueSources(env: AppEnv) {
+  await ensureSchema(env.DB);
+  const rows = await env.DB.prepare(
+    "SELECT id FROM sources WHERE enabled = 1 AND kind IN ('rss', 'x') AND (last_synced_at IS NULL OR julianday('now') - julianday(last_synced_at) >= COALESCE(sync_interval_minutes, CASE kind WHEN 'x' THEN 60 ELSE 1440 END) / 1440.0) ORDER BY last_synced_at IS NOT NULL, last_synced_at LIMIT 30",
+  ).all<{ id: number }>();
   const results = await Promise.allSettled(rows.results.map((row) => syncSource(env, row.id)));
   return results.filter((result) => result.status === "fulfilled").reduce((count, result) => count + (result as PromiseFulfilledResult<number>).value, 0);
 }

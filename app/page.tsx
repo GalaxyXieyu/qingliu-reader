@@ -1248,7 +1248,7 @@ export function DeskApp({ initialView = "today" }: { initialView?: DeskView }) {
       setNewTokenName("");
       await loadApiTokens();
     } catch (error) { setNotice(error instanceof Error ? error.message : "创建密钥失败"); }
-    finally { setBusy(null); }
+    finally { setBusy(""); }
   }
 
   async function revokeApiToken(id: number) {
@@ -1257,7 +1257,7 @@ export function DeskApp({ initialView = "today" }: { initialView?: DeskView }) {
       await fetch("/api/tokens", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) });
       await loadApiTokens();
     } catch (error) { setNotice(error instanceof Error ? error.message : "撤销失败"); }
-    finally { setBusy(null); }
+    finally { setBusy(""); }
   }
 
   function copyFreshToken() {
@@ -1934,7 +1934,7 @@ export function DeskApp({ initialView = "today" }: { initialView?: DeskView }) {
         </div>}
     </section>}
 
-    {addOpen && <Modal title="收录新来源" onClose={() => setAddOpen(false)} wide><form className="modal-form" onSubmit={addSubscription}><label htmlFor="source-input">作者主页、公众号文章或博客地址</label><input id="source-input" value={sourceInput} onChange={(event) => setSourceInput(event.target.value)} placeholder="粘贴作者主页、公众号文章或博客地址" /><fieldset className="source-category-choice"><legend>内容分类</legend><p>选择这个来源最常发布的主题。</p><div>{SOURCE_CATEGORIES.map((category) => <label className={sourceCategory === category.value ? "selected" : ""} key={category.value}><input type="radio" name="source-category" value={category.value} checked={sourceCategory === category.value} onChange={() => setSourceCategory(category.value)} /><span>{category.label}</span></label>)}</div></fieldset><p>收录成功后会自动关注。系统首次导入最近 20 篇，X 每小时更新，其他每天更新。</p><div className="form-actions"><button type="button" onClick={() => setAddOpen(false)}>取消</button><button className="primary-button" disabled={busy === "source"}>{busy === "source" ? "正在识别" : "收录并关注"}</button></div></form></Modal>}
+    {addOpen && <Modal title="收录新来源" onClose={() => setAddOpen(false)} wide><form className="modal-form" onSubmit={addSubscription}><label htmlFor="source-input">作者主页、公众号文章或博客地址</label><input id="source-input" value={sourceInput} onChange={(event) => setSourceInput(event.target.value)} placeholder="粘贴作者主页、公众号文章或博客地址" /><fieldset className="source-category-choice"><legend>内容分类</legend><p>选择这个来源最常发布的主题。</p><div>{SOURCE_CATEGORIES.map((category) => <label className={sourceCategory === category.value ? "selected" : ""} key={category.value}><input type="radio" name="source-category" value={category.value} checked={sourceCategory === category.value} onChange={() => setSourceCategory(category.value)} /><span>{category.label}</span></label>)}</div></fieldset><p>收录成功后会自动关注。系统首次导入最近 20 篇，X 默认每小时更新，其他默认每天更新；可在 topics CLI 用 sources set 调整每源拉取间隔。</p><div className="form-actions"><button type="button" onClick={() => setAddOpen(false)}>取消</button><button className="primary-button" disabled={busy === "source"}>{busy === "source" ? "正在识别" : "收录并关注"}</button></div></form></Modal>}
 
     {authOpen && <Modal title={authMode === "login" ? "登录清流阅读" : "注册清流阅读"} onClose={() => { setAuthOpen(false); setAuthError(""); }}><form className="modal-form" onSubmit={submitAuth}><div className="auth-switch"><button type="button" className={authMode === "login" ? "active" : ""} onClick={() => { setAuthMode("login"); setAuthError(""); }}>登录</button><button type="button" className={authMode === "register" ? "active" : ""} onClick={() => { setAuthMode("register"); setAuthError(""); }}>注册</button></div><label>账号<input value={authAccount} maxLength={64} autoComplete="username" onChange={(event) => setAuthAccount(event.target.value)} /></label>{authMode === "register" && <label>昵称<input value={authNickname} maxLength={40} autoComplete="nickname" onChange={(event) => setAuthNickname(event.target.value)} /></label>}<label>密码<input type="password" value={authPassword} minLength={8} maxLength={128} autoComplete={authMode === "login" ? "current-password" : "new-password"} onChange={(event) => setAuthPassword(event.target.value)} /></label>{authMode === "register" && <label>确认密码<input type="password" value={authConfirm} minLength={8} maxLength={128} autoComplete="new-password" onChange={(event) => setAuthConfirm(event.target.value)} /></label>}<p>{authMode === "login" ? "登录后会保存你的阅读、收藏和批注记录。" : "账号用于登录，昵称会显示在排行榜和公开批注中。"}</p>{authError && <div className="auth-feedback error" role="alert">{authError}</div>}<button className="primary-button full" disabled={busy === "auth"}>{busy === "auth" ? authMode === "login" ? "正在登录…" : "正在注册…" : authMode === "login" ? "登录" : "注册并登录"}</button></form></Modal>}
 

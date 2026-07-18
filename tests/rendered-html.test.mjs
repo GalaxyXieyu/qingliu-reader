@@ -575,10 +575,13 @@ test("ships unified subscriptions, daily sync, translation, reading, and idea wo
   assert.match(store, /DELETE FROM items WHERE source_id = \? AND kind = 'link'/);
   assert.doesNotMatch(store, /免费 X RSS 桥/);
   assert.match(importQueueRoute, /sync-all/);
-  assert.match(viteConfig, /0 \* \* \* \*/);
-  assert.match(viteConfig, /0 1 \* \* \*/);
-  assert.match(worker, /controller\.cron === X_HOURLY_CRON \? "x" : "rss"/);
-  assert.match(page, /X 每小时更新，其他每天更新/);
+  assert.match(importQueueRoute, /sync-due/);
+  assert.match(viteConfig, /\*\/15 \* \* \* \*/);
+  assert.match(worker, /syncDueSources/);
+  assert.match(store, /sync_interval_minutes/);
+  assert.match(store, /CASE kind WHEN 'x' THEN 60 ELSE 1440 END/);
+  assert.match(sourceRoute, /set-interval/);
+  assert.match(page, /X 默认每小时更新，其他默认每天更新/);
   assert.match(page, /source\.itemCount/);
   assert.match(page, /data\.sources\.length/);
   assert.match(page, /todayEstimatedMinutes/);

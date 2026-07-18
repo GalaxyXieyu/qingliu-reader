@@ -14,8 +14,9 @@ const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
 const localBindingConfig = {
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
-  // X long-form articles update hourly. RSS/blog sources update daily at 09:00 Asia/Shanghai.
-  triggers: { crons: ["0 * * * *", "0 1 * * *"] },
+  // The worker wakes every 15 minutes and syncs whichever sources are due
+  // (per-source sync_interval_minutes; defaults: X hourly, RSS daily).
+  triggers: { crons: ["*/15 * * * *"] },
   d1_databases: d1
     ? [
         {

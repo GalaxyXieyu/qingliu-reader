@@ -42,6 +42,7 @@ export const sources = sqliteTable("sources", {
   lastError: text("last_error"),
   avatarUrl: text("avatar_url"),
   contributorUserId: integer("contributor_user_id").references(() => users.id),
+  syncIntervalMinutes: integer("sync_interval_minutes"),
   createdAt: text("created_at").notNull(),
 });
 

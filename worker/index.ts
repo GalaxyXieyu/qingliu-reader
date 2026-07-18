@@ -1,9 +1,7 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
-import { processPendingItems, promotePendingXArticles, syncSourcesByKind } from "../lib/store";
-
-const X_HOURLY_CRON = "0 * * * *";
+import { processPendingItems, promotePendingXArticles, syncDueSources } from "../lib/store";
 
 interface Env {
   ASSETS: Fetcher;
@@ -46,9 +44,9 @@ const worker = {
 
     return handler.fetch(request, env, ctx);
   },
-  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil((async () => {
-      await syncSourcesByKind(env, controller.cron === X_HOURLY_CRON ? "x" : "rss");
+      await syncDueSources(env);
       await promotePendingXArticles(env);
       await processPendingItems(env);
     })());
