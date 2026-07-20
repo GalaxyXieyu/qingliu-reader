@@ -13,6 +13,8 @@ type Topic = {
   series: string | null;
   seriesOrder: number | null;
   scheduledDate: string | null;
+  publishedDate: string | null;
+  publishedUrl: string | null;
   notes: string | null;
   heat: number;
   matchScore: number;
@@ -25,6 +27,13 @@ type Topic = {
   updatedAt: string | null;
 };
 
+type SeriesSummary = {
+  series: string;
+  count: number;
+  minOrder: number | null;
+  maxOrder: number | null;
+};
+
 async function fetchTopics(origin: string, cookie: string | null): Promise<Topic[]> {
   const response = await fetch(`${origin}/api/topics`, {
     headers: cookie ? { cookie } : {},
@@ -35,6 +44,16 @@ async function fetchTopics(origin: string, cookie: string | null): Promise<Topic
   return data.topics ?? [];
 }
 
+async function fetchSeries(origin: string, cookie: string | null): Promise<SeriesSummary[]> {
+  const response = await fetch(`${origin}/api/series`, {
+    headers: cookie ? { cookie } : {},
+    cache: "no-store",
+  });
+  if (!response.ok) return [];
+  const data = (await response.json()) as { series?: SeriesSummary[] };
+  return data.series ?? [];
+}
+
 export default async function TopicsPage() {
   const requestHeaders = await headers();
   const host = requestHeaders.get("x-forwarded-host") || requestHeaders.get("host") || "localhost:3000";
@@ -42,7 +61,10 @@ export default async function TopicsPage() {
   const origin = `${protocol}://${host}`;
   const cookie = requestHeaders.get("cookie");
 
-  const topics = await fetchTopics(origin, cookie);
+  const [topics, series] = await Promise.all([
+    fetchTopics(origin, cookie),
+    fetchSeries(origin, cookie),
+  ]);
 
   return (
     <div className="min-h-screen bg-[var(--canvas)] text-[var(--ink)]">
@@ -61,7 +83,7 @@ export default async function TopicsPage() {
         </nav>
       </header>
       <main className="p-6">
-        <Board topics={topics} />
+        <Board initialTopics={topics} initialSeries={series} />
       </main>
     </div>
   );

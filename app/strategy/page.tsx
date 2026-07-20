@@ -72,9 +72,9 @@ export default async function StrategyPage() {
         <div className="flex-1">
           {strategy ? (
             <StrategyEditor
-              version={strategy.version}
-              note={strategy.note}
-              initialContent={contentJson}
+              initialVersion={strategy.version}
+              initialNote={strategy.note}
+              initialData={strategy.data}
             />
           ) : (
             <div className="flex h-40 items-center justify-center text-[var(--muted)]">策略加载失败，请检查登录状态</div>
