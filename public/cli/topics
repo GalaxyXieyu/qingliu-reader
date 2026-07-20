@@ -34,6 +34,45 @@ topics — 内容选题中心的多端 CLI（云端命令集 P1）
   topics profile set --file 文件.json       # 上传新版提示词（自动版本+1）
   topics profile versions                   # 版本历史
 
+策略命令:
+  topics strategy                          # 完整策略 JSON
+  topics strategy --platform gzh|xhs       # 只要某平台部分
+  topics strategy --section banned_patterns|derivation_order|cta_templates
+  topics strategy --cached                 # 用本地缓存（离线）
+  topics strategy --json                   # 纯 JSON（Skills 管道消费）
+  topics strategy versions                 # 版本历史
+  topics strategy set --file strategy.json --note "说明"
+  topics strategy activate <version>       # 回滚版本
+
+选题管理命令:
+  topics board                             # 四列看板
+  topics board --status approved           # 单列过滤
+  topics board --series "LangGraph"        # 按系列过滤
+  topics board --json                      # JSON 输出
+  topics edit <id> --title "新" --angle "..." --platform gzh \\
+    --content-type 连载 --series "LangGraph" --series-order 3 --note "..."
+  topics schedule <id> --date 2026-07-25
+  topics unschedule <id>
+  topics calendar                          # 本周排期
+  topics calendar --month 2026-07          # 整月
+  topics calendar --json
+  topics publish <id> --url "https://..." --reads 1024 --likes 56 --collects 89 --shares 12
+  topics publish <id> --url "..." --date 2026-07-20
+  topics series                            # 列出所有系列
+  topics series "LangGraph实战"             # 该系列详情
+
+复盘命令:
+  topics retro                             # 列出激活版复盘
+  topics retro --history                   # 包含历史版本
+  topics retro new --date 2026-07-20 --title "..." --problem "..." --result "..." --lesson "..." [--series "..."] [--topics 5,7,9]
+  topics retro revise <id> --lesson "新教训" [--result "..."] [--problem "..."]
+  topics retro history --title "..."
+
+CLI 维护命令:
+  topics update                             # 从远程更新到最新版
+  topics update --check                     # 只检查不更新
+  topics version                            # 显示当前版本
+
 账号命令:
   topics whoami / config / logout [--revoke]
   topics token list / create <名字> / revoke <id>
@@ -47,6 +86,7 @@ import re
 import socket
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -54,6 +94,8 @@ from pathlib import Path
 DEFAULT_ENDPOINT = "https://topic.aigalaxy.top:8443"
 CONFIG_DIR = Path(os.environ.get("TOPICS_CONFIG_DIR", "~/.config/topics-cli")).expanduser()
 CONFIG_FILE = CONFIG_DIR / "config.json"
+STRATEGY_CACHE = CONFIG_DIR / "strategy-cache.json"
+CLI_VERSION = "2.0.0"
 
 KIND_ICON = {"rss": "📰", "x": "𝕏 ", "x-tweet": "𝕏 ", "wechat": "💬", "link": "🔗"}
 CATEGORY_LABEL = {"ai": "AI", "investment": "投资", "gaming": "游戏", "technology": "科技", "business": "商业", "product": "产品"}
@@ -463,6 +505,385 @@ def cmd_profile(args):
     print(active.get("content", ""))
 
 
+# ─── 策略 ────────────────────────────────────────────────────────────────────
+
+STRATEGY_SECTIONS = {"banned_patterns", "derivation_order", "cta_templates"}
+STRATEGY_PLATFORMS = {"gzh", "xhs"}
+
+
+def cmd_strategy(args):
+    """策略查看 / 管理（平台策略、禁用词、CTA 模板等）"""
+    sub = getattr(args, "sub", None)
+
+    # --- versions: 版本历史 ---
+    if sub == "versions":
+        for v in request("/api/strategy/versions").get("versions", []):
+            act = "← 当前" if v.get("isActive") else ""
+            print(f"  v{v['version']}  {v.get('createdAt', '')[:16]}  {v.get('note') or ''} {act}")
+        return
+
+    # --- set: 上传新策略 ---
+    if sub == "set":
+        if not args.file:
+            sys.exit("用法: topics strategy set --file strategy.json --note \"说明\"")
+        content = Path(args.file).read_text()
+        json.loads(content)  # 校验 JSON 合法
+        note = args.note or "via cli"
+        r = request("/api/strategy", "POST", {"content": content, "note": note})
+        print(f"✅ 策略已保存为 v{r.get('version')} 并设为当前版本")
+        return
+
+    # --- activate: 回滚版本 ---
+    if sub == "activate":
+        if not args.version:
+            sys.exit("用法: topics strategy activate <version>")
+        r = request("/api/strategy/versions", "POST", {"version": int(args.version)})
+        print(f"✅ 已激活策略 v{r.get('version')}（{r.get('note', '')}）")
+        return
+
+    # --- 默认: 查看策略 ---
+    # 构造 query 参数
+    params = []
+    if args.platform:
+        params.append(f"platform={args.platform}")
+    if args.section:
+        params.append(f"section={args.section}")
+    qs = ("?" + "&".join(params)) if params else ""
+
+    if args.cached:
+        # 读本地缓存
+        if not STRATEGY_CACHE.exists():
+            sys.exit("没有本地缓存，先跑一次 topics strategy 拉取")
+        data = json.loads(STRATEGY_CACHE.read_text())
+    else:
+        data = request(f"/api/strategy{qs}")
+        # 完整拉取（无 platform/section 过滤）时缓存
+        if not args.platform and not args.section:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            STRATEGY_CACHE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+
+    # --json: 纯 JSON 输出（Skills 管道消费）
+    if args.json:
+        print(json.dumps(data.get("data", data), ensure_ascii=False))
+        return
+
+    # 人类可读输出
+    version = data.get("version", "?")
+    note = data.get("note", "")
+    content = data.get("data", data)
+
+    print(f"# 策略 v{version} · {note}")
+    print()
+    print(json.dumps(content, ensure_ascii=False, indent=2))
+
+
+# ─── 选题管理 ──────────────────────────────────────────────────────────────────
+
+BOARD_COLUMNS = [
+    ("candidate", "📥候选"),
+    ("approved", "✅入选"),
+    ("scheduled", "📅排期中"),
+    ("published", "🚀已发布"),
+    ("skipped", "⏭️已跳过"),
+]
+
+
+def cmd_board(args):
+    """选题看板：四列 / 单列过滤"""
+    rows = request("/api/topics").get("topics", [])
+    if not rows:
+        print("（还没有选题——评估器每 6 小时跑一轮）")
+        return
+
+    # 过滤
+    if args.status:
+        rows = [t for t in rows if t.get("status") == args.status]
+    if args.series:
+        rows = [t for t in rows if t.get("series") == args.series]
+
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False))
+        return
+
+    if args.status or args.series:
+        # 单列模式
+        _print_topic_list(rows)
+        return
+
+    # 四列看板模式
+    for status, label in BOARD_COLUMNS:
+        col = [t for t in rows if t.get("status") == status]
+        if not col:
+            continue
+        print(f"\n{'─' * 60}")
+        print(f"{label}（{len(col)}）")
+        print(f"{'─' * 60}")
+        _print_topic_list(col, compact=True)
+    print(f"\n共 {len(rows)} 条 · topics board --status <status> 单列过滤 · topics edit <id> 修改")
+
+
+def _print_topic_list(rows, compact=False):
+    for t in rows:
+        sid = f"#{t['id']}"
+        title = str(t.get("title", ""))[:40]
+        extra_parts = []
+        if t.get("platform"):
+            extra_parts.append(t["platform"])
+        if t.get("contentType"):
+            extra_parts.append(t["contentType"])
+        if t.get("series"):
+            so = f"#{t.get('seriesOrder', '?')}" if t.get("seriesOrder") else ""
+            extra_parts.append(f"{t['series']}{so}")
+        if t.get("scheduledDate"):
+            extra_parts.append(f"📅{t['scheduledDate'][:10]}")
+        extra = " · ".join(extra_parts) if extra_parts else ""
+        if compact:
+            print(f"  {sid:<5} {title:<42} {extra}")
+        else:
+            print(f"  {sid:<5} {title}")
+            if t.get("angle"):
+                print(f"        角度: {t['angle']}")
+            if extra:
+                print(f"        {extra}")
+            print()
+
+
+def cmd_edit(args):
+    """编辑选题"""
+    body = {}
+    if args.title is not None:
+        body["title"] = args.title
+    if args.angle is not None:
+        body["angle"] = args.angle
+    if args.platform is not None:
+        body["platform"] = args.platform
+    if args.content_type is not None:
+        body["contentType"] = args.content_type
+    if args.series is not None:
+        body["series"] = args.series
+    if args.series_order is not None:
+        body["seriesOrder"] = args.series_order
+    if args.note is not None:
+        body["notes"] = args.note
+    if not body:
+        sys.exit("至少指定一个要修改的字段（--title / --angle / --platform 等）")
+    r = request(f"/api/topics/{args.id}", "PATCH", body)
+    print(f"✅ 选题 #{args.id} 已更新")
+    for k, v in body.items():
+        print(f"   {k}: {v}")
+
+
+def cmd_schedule(args):
+    """排期"""
+    r = request(f"/api/topics/{args.id}/schedule", "POST", {"date": args.date})
+    print(f"✅ 选题 #{args.id} 已排期到 {args.date}")
+
+
+def cmd_unschedule(args):
+    """取消排期"""
+    request(f"/api/topics/{args.id}", "PATCH", {"scheduledDate": None, "status": "approved"})
+    print(f"✅ 选题 #{args.id} 已取消排期（回到入选状态）")
+
+
+def cmd_calendar(args):
+    """排期日历"""
+    if args.month:
+        cal = args.month
+    else:
+        cal = "week"
+    data = request(f"/api/series?calendar={cal}")
+    items = data.get("calendar") or data.get("items") or data.get("topics") or []
+
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False))
+        return
+
+    if not items:
+        print("（该时段没有排期的选题）")
+        return
+
+    # 按日期分组
+    by_date = {}
+    for t in items:
+        d = (t.get("scheduledDate") or t.get("date") or "")[:10]
+        by_date.setdefault(d, []).append(t)
+    for d in sorted(by_date):
+        print(f"\n📅 {d}")
+        for t in by_date[d]:
+            plat = t.get("platform", "")
+            print(f"  #{t['id']:<4} [{plat:<4}] {t.get('title', '')[:40]}")
+
+
+def cmd_publish(args):
+    """标记已发布"""
+    body = {"url": args.url}
+    if args.date:
+        body["date"] = args.date
+    if args.reads is not None:
+        body["reads"] = args.reads
+    if args.likes is not None:
+        body["likes"] = args.likes
+    if args.collects is not None:
+        body["collects"] = args.collects
+    if args.shares is not None:
+        body["shares"] = args.shares
+    r = request(f"/api/topics/{args.id}/publish", "POST", body)
+    print(f"✅ 选题 #{args.id} 已标记为已发布")
+    if args.url:
+        print(f"   链接: {args.url}")
+
+
+def cmd_series(args):
+    """系列列表 / 详情"""
+    if args.name:
+        data = request(f"/api/series?name={urllib.parse.quote(args.name)}")
+        s = data.get("series") or data
+        if isinstance(s, list):
+            s = s[0] if s else {}
+        if not s:
+            print(f"（未找到系列「{args.name}」）")
+            return
+        print(f"# {s.get('name', '')}（{s.get('topicCount', 0)} 篇）")
+        if s.get("description"):
+            print(f"  {s['description']}")
+        topics = s.get("topics") or data.get("topics") or []
+        for t in topics:
+            so = f"#{t.get('seriesOrder', '?')}" if t.get("seriesOrder") else "  "
+            status = t.get("status", "")
+            print(f"  {so} #{t['id']:<4} [{status:<10}] {t.get('title', '')[:40]}")
+        return
+
+    # 无参数: 列出所有系列
+    rows = request("/api/series").get("series") or request("/api/series").get("data") or []
+    if not rows:
+        print("（还没有系列）")
+        return
+    for s in rows:
+        print(f"  {s.get('name', ''):<24} {s.get('topicCount', 0)} 篇 · {s.get('description', '')[:40]}")
+
+
+# ─── 复盘 ────────────────────────────────────────────────────────────────────
+
+def cmd_retro(args):
+    """复盘命令"""
+    sub = getattr(args, "sub", None)
+
+    # --- new: 新建复盘 ---
+    if sub == "new":
+        if not args.date or not args.title or not args.problem or not args.result or not args.lesson:
+            sys.exit("用法: topics retro new --date YYYY-MM-DD --title ... --problem ... --result ... --lesson ...")
+        body = {
+            "date": args.date,
+            "title": args.title,
+            "problem": args.problem,
+            "result": args.result,
+            "lesson": args.lesson,
+        }
+        if args.series:
+            body["relatedSeries"] = args.series
+        if args.topics:
+            body["relatedTopicIds"] = [int(x.strip()) for x in args.topics.split(",") if x.strip()]
+        r = request("/api/retrospectives", "POST", body)
+        print(f"✅ 复盘 #{r.get('id')} 已创建")
+        return
+
+    # --- revise: 修订复盘 ---
+    if sub == "revise":
+        if not args.id:
+            sys.exit("用法: topics retro revise <id> --lesson \"新教训\"")
+        body = {}
+        if args.lesson is not None:
+            body["lesson"] = args.lesson
+        if args.result is not None:
+            body["result"] = args.result
+        if args.problem is not None:
+            body["problem"] = args.problem
+        if not body:
+            sys.exit("至少指定 --lesson / --result / --problem 之一")
+        r = request(f"/api/retrospectives/{args.id}", "POST", body)
+        print(f"✅ 复盘 #{args.id} 已修订")
+        return
+
+    # --- history: 按标题查历史 ---
+    if sub == "history":
+        if not args.title:
+            sys.exit("用法: topics retro history --title \"...\"")
+        data = request(f"/api/retrospectives/0?title={urllib.parse.quote(args.title)}")
+        versions = data.get("versions") or data.get("history") or [data]
+        for v in versions:
+            print(f"  v{v.get('version', '?')}  {v.get('date', '')[:10]}  {v.get('title', '')[:40]}")
+            if v.get("lesson"):
+                print(f"        教训: {v['lesson'][:60]}")
+        return
+
+    # --- 默认: 列出复盘 ---
+    qs = "?history=1" if args.history else ""
+    data = request(f"/api/retrospectives{qs}")
+    items = data.get("retrospectives") or data.get("data") or []
+    if not items:
+        print("（还没有复盘记录）")
+        return
+    for r in items:
+        active = "← 当前" if r.get("isActive") else ""
+        print(f"  #{r.get('id', '?'):<3} v{r.get('version', '?')}  {r.get('date', '')[:10]}  {r.get('title', '')[:40]} {active}")
+        if r.get("lesson"):
+            print(f"        教训: {r['lesson'][:60]}")
+    print(f"\n共 {len(items)} 条 · topics retro new 创建 · topics retro revise <id> 修订")
+
+
+# ─── CLI 维护 ──────────────────────────────────────────────────────────────────
+
+def cmd_version(_):
+    print(f"topics CLI v{CLI_VERSION}")
+    print(f"endpoint: {endpoint()}")
+
+
+def cmd_update(args):
+    """自更新 CLI 脚本"""
+    script_path = Path(sys.argv[0]).resolve()
+    if not script_path.exists():
+        sys.exit(f"无法定位脚本路径: {script_path}")
+
+    # 下载远程脚本
+    url = f"{endpoint()}/cli/topics"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": f"topics-cli/{CLI_VERSION}"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            remote_content = resp.read().decode()
+    except Exception as e:
+        sys.exit(f"下载失败: {e}")
+
+    # 提取远程版本号
+    m = re.search(r'CLI_VERSION\s*=\s*"([^"]+)"', remote_content)
+    if not m:
+        sys.exit("无法从远程脚本提取版本号")
+    remote_ver = m.group(1)
+
+    if args.check:
+        if remote_ver == CLI_VERSION:
+            print(f"✅ 已是最新版 v{CLI_VERSION}")
+        else:
+            print(f"本地: v{CLI_VERSION} → 远程: v{remote_ver}")
+            print(f"运行 topics update 更新")
+        return
+
+    # 执行更新
+    if remote_ver == CLI_VERSION:
+        print(f"已是最新版 v{CLI_VERSION}，无需更新")
+        return
+
+    # 备份
+    backup_path = script_path.parent / f"topics.backup-{CLI_VERSION}"
+    backup_path.write_text(script_path.read_text())
+    print(f"✅ 已备份到 {backup_path}")
+
+    # 写入新内容
+    script_path.write_text(remote_content)
+    os.chmod(script_path, 0o755)
+    print(f"✅ 已更新到 v{remote_ver}")
+    print(f"   重新运行: topics version 确认")
+
+
 def main():
     ap = argparse.ArgumentParser(prog="topics", description="内容选题中心 CLI", usage=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -537,12 +958,88 @@ def main():
     pf.add_argument("--file")
     pf.add_argument("--note")
 
+    # ─── 策略 ───
+    st = sub.add_parser("strategy", help="内容策略管理")
+    st.add_argument("sub", nargs="?", default="show", choices=["show", "versions", "set", "activate"])
+    st.add_argument("--platform", choices=["gzh", "xhs"], help="只看某个平台")
+    st.add_argument("--section", choices=["banned_patterns", "derivation_order", "cta_templates"], help="只看某个部分")
+    st.add_argument("--cached", action="store_true", help="用本地缓存（离线）")
+    st.add_argument("--json", action="store_true", help="纯 JSON 输出（Skills 管道消费）")
+    st.add_argument("--file", help="strategy set: 策略文件路径")
+    st.add_argument("--note", help="strategy set: 版本说明")
+    st.add_argument("version", nargs="?", help="strategy activate: 版本号")
+
+    # ─── 选题管理 ───
+    bd = sub.add_parser("board", help="选题看板")
+    bd.add_argument("--status", choices=["candidate", "approved", "scheduled", "published", "skipped"], help="单列过滤")
+    bd.add_argument("--series", help="按系列过滤")
+    bd.add_argument("--json", action="store_true", help="JSON 输出")
+
+    ed = sub.add_parser("edit", help="编辑选题")
+    ed.add_argument("id", type=int)
+    ed.add_argument("--title")
+    ed.add_argument("--angle")
+    ed.add_argument("--platform", choices=["gzh", "xhs"])
+    ed.add_argument("--content-type", dest="content_type", help="内容类型，如 连载/单品")
+    ed.add_argument("--series", help="系列名")
+    ed.add_argument("--series-order", dest="series_order", type=int, help="系列序号")
+    ed.add_argument("--note", help="备注")
+
+    sch = sub.add_parser("schedule", help="排期")
+    sch.add_argument("id", type=int)
+    sch.add_argument("--date", required=True, help="日期 YYYY-MM-DD")
+
+    uns = sub.add_parser("unschedule", help="取消排期")
+    uns.add_argument("id", type=int)
+
+    cal = sub.add_parser("calendar", help="排期日历")
+    cal.add_argument("--month", help="整月 YYYY-MM，默认本周")
+    cal.add_argument("--json", action="store_true", help="JSON 输出")
+
+    pub = sub.add_parser("publish", help="标记已发布")
+    pub.add_argument("id", type=int)
+    pub.add_argument("--url", required=True, help="发布链接")
+    pub.add_argument("--date", help="发布日期 YYYY-MM-DD")
+    pub.add_argument("--reads", type=int, help="阅读数")
+    pub.add_argument("--likes", type=int, help="点赞数")
+    pub.add_argument("--collects", type=int, help="收藏数")
+    pub.add_argument("--shares", type=int, help="分享数")
+
+    srs = sub.add_parser("series", help="系列列表 / 详情")
+    srs.add_argument("name", nargs="?", help="系列名（不传则列出所有）")
+
+    # ─── 复盘 ───
+    rt = sub.add_parser("retro", help="复盘管理")
+    rt.add_argument("sub", nargs="?", default="list", choices=["list", "new", "revise", "history"])
+    rt.add_argument("id", nargs="?", type=int, help="retro revise: 复盘ID")
+    rt.add_argument("--history", action="store_true", help="包含历史版本")
+    rt.add_argument("--date", help="new: 日期 YYYY-MM-DD")
+    rt.add_argument("--title", help="new/history: 标题")
+    rt.add_argument("--problem", help="new/revise: 问题")
+    rt.add_argument("--result", help="new/revise: 结果")
+    rt.add_argument("--lesson", help="new/revise: 教训")
+    rt.add_argument("--series", help="new: 关联系列")
+    rt.add_argument("--topics", help="new: 关联选题ID，逗号分隔如 5,7,9")
+
+    # ─── CLI 维护 ───
+    sub.add_parser("version", help="显示 CLI 版本")
+    upd = sub.add_parser("update", help="更新 CLI 到最新版")
+    upd.add_argument("--check", action="store_true", help="只检查不更新")
+
     args = ap.parse_args()
-    {"login": cmd_login, "logout": cmd_logout, "whoami": cmd_whoami, "config": cmd_config,
-     "token": cmd_token, "sub": cmd_sub, "unsub": cmd_unsub, "sources": cmd_sources,
-     "sync": cmd_sync, "imports": cmd_imports, "inbox": cmd_inbox, "open": cmd_open,
-     "save": cmd_save, "capture": cmd_capture, "review": cmd_review,
-     "approve": cmd_approve, "skip": cmd_skip, "profile": cmd_profile}[args.cmd](args)
+    handlers = {
+        "login": cmd_login, "logout": cmd_logout, "whoami": cmd_whoami,
+        "config": cmd_config, "token": cmd_token, "sub": cmd_sub,
+        "unsub": cmd_unsub, "sources": cmd_sources, "sync": cmd_sync,
+        "imports": cmd_imports, "inbox": cmd_inbox, "open": cmd_open,
+        "save": cmd_save, "capture": cmd_capture, "review": cmd_review,
+        "approve": cmd_approve, "skip": cmd_skip, "profile": cmd_profile,
+        "strategy": cmd_strategy, "board": cmd_board, "edit": cmd_edit,
+        "schedule": cmd_schedule, "unschedule": cmd_unschedule,
+        "calendar": cmd_calendar, "publish": cmd_publish, "series": cmd_series,
+        "retro": cmd_retro, "version": cmd_version, "update": cmd_update,
+    }
+    handlers[args.cmd](args)
 
 
 if __name__ == "__main__":

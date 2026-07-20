@@ -122,3 +122,252 @@ export async function importTweets(env: Env, author: string, handle: string,
   await env.DB.prepare("UPDATE sources SET last_synced_at = ? WHERE id = ?").bind(now(), source!.id).run();
   return added;
 }
+
+// ─── 内容策略管理（D-05 版本化）────────────────────────
+
+const DEFAULT_STRATEGY = {
+  platforms: {
+    wechat_gzh: {
+      positioning: "搜索长尾资产+深度沉淀",
+      content_routing: {
+        "工具教程": { allowed: true, rule: "完整步骤+亲测+标题含搜索词" },
+        "实战踩坑": { allowed: true, rule: "有项目有截图，读者能直接复用" },
+        "判断型": { allowed: true, rule: "强立场+比较，不模棱两可" },
+        "热点借势": { allowed: "conditional", rule: "48小时内+亲测角度，缺一不可" },
+        "纯新闻转述": { allowed: false, reason: "量子位更快更全" },
+        "纯方法论": { allowed: false, reason: "无搜索词，无留存价值" },
+      },
+      title_formulas: {
+        "工具教程": "[工具]实战：怎么[做XX]",
+        "实战踩坑": "用了[时间][工具]，这几个坑要注意",
+        "判断型": "为什么[我/你]选[X]而不是[Y]",
+        "热点借势": "[工具]我测了[时间]，说几个真实体验",
+      },
+      publish_rules: ["单日≤1篇", "热点≤48小时", "系列必须有第0篇大纲+footer导航"],
+    },
+    xiaohongshu: {
+      positioning: "算法推流+收藏传播",
+      key_metric: "收藏/点赞比≥1.5x",
+      content_routing: {
+        "可视化图表": { heat: 3155, allowed: true, rule: "AI生图/架构图/PPT配图，秀成果优先" },
+        "数据分析": { heat: 801, allowed: true, rule: "反常识开头+情绪收尾" },
+        "Agent成果": { heat: 312, allowed: true, rule: "必须有成果图/GIF" },
+        "AI编程教程": { heat: 165, allowed: "conditional", rule: "必须配视频或操作图" },
+        "模型资讯": { heat: 128, allowed: false, reason: "XHS用户不看新闻" },
+      },
+      title_formulas: {
+        structure: "[emoji][数字][痛点/结果]",
+        required_two_of_three: ["emoji在最前", "数字", "痛点或结果"],
+        blacklist: ["分享", "介绍", "简单聊聊", "浅谈", "全面", "深度", "一文读懂", "教程", "入门到精通"],
+      },
+    },
+  },
+  topic_routing_matrix: {
+    "工具完整教程": { GZH: "主发长文", XHS: "有配图才做摘要版" },
+    "可视化成果": { GZH: "可选", XHS: "主发，视频优先" },
+    "职业洞察": { GZH: "深度分析版", XHS: "情绪版反常识开头" },
+    "AI热点": { GZH: "有亲测才做", XHS: "不做" },
+    "LangGraph实战": { GZH: "连载教程", XHS: "成果展示版" },
+  },
+  banned_patterns: {
+    words: ["说白了", "意味着", "本质上", "换句话说", "不可否认", "综上所述", "总的来说", "值得注意的是", "不难发现", "显而易见", "让我们来看看", "随着AI技术的发展", "希望对大家有所帮助", "如有不足欢迎指正", "具有重要意义", "不说废话直接上干货"],
+    punctuation: { "冒号": "改用逗号或重构", "破折号": "改用逗号句号", "双引号": "改用「」或不加" },
+    structures: ["连续bullet>3个", "每段都有加粗小标题", "优点是A缺点是B的假平衡"],
+    vague_refs: ["AI工具→写具体名", "某个模型→写具体名", "相关技术→说清楚"],
+  },
+  derivation_order: ["master", "video_script", "gzh_version", "xhs_version", "x_thread"],
+  cta_templates: {
+    gzh_private: "想深入交流这个话题，欢迎加我微信：[微信号]",
+    gzh_follow: "更多实战内容，关注这个公众号，每周更新",
+    xhs_collect: "收藏这篇，下次用到直接翻",
+    xhs_comment: "你也遇到过这个问题吗？评论区聊聊👇",
+  },
+};
+
+export async function getActiveStrategy(env: Env) {
+  await ensureSchema(env.DB);
+  const row = await env.DB.prepare("SELECT id, version, content, note, created_at AS createdAt FROM content_strategies WHERE is_active = 1 ORDER BY id DESC LIMIT 1").first<Record<string, unknown>>();
+  if (row) return row;
+  const content = JSON.stringify(DEFAULT_STRATEGY);
+  await env.DB.prepare("INSERT INTO content_strategies (version, content, note, is_active, created_at) VALUES (1, ?, '初始版本(从本地内容策略.md迁移)', 1, ?)").bind(content, now()).run();
+  return { id: 1, version: 1, content, note: "初始版本", createdAt: now() };
+}
+
+export async function saveStrategy(env: Env, content: string, note: string) {
+  await ensureSchema(env.DB);
+  JSON.parse(content); // D-17：仅合法性校验，不严格 schema
+  const max = await env.DB.prepare("SELECT COALESCE(MAX(version), 0) AS v FROM content_strategies").first<{ v: number }>();
+  const version = Number(max?.v || 0) + 1;
+  await env.DB.batch([
+    env.DB.prepare("UPDATE content_strategies SET is_active = 0"),
+    env.DB.prepare("INSERT INTO content_strategies (version, content, note, is_active, created_at) VALUES (?, ?, ?, 1, ?)").bind(version, content, (note || "").slice(0, 200), now()),
+  ]);
+  return { version };
+}
+
+export async function listStrategyVersions(env: Env) {
+  await ensureSchema(env.DB);
+  const rows = await env.DB.prepare("SELECT id, version, note, is_active AS isActive, created_at AS createdAt FROM content_strategies ORDER BY version DESC LIMIT 30").all();
+  return rows.results;
+}
+
+export async function activateStrategyVersion(env: Env, version: number) {
+  await ensureSchema(env.DB);
+  const target = await env.DB.prepare("SELECT id FROM content_strategies WHERE version = ?").bind(version).first();
+  if (!target) throw new Error("版本不存在");
+  await env.DB.batch([
+    env.DB.prepare("UPDATE content_strategies SET is_active = 0"),
+    env.DB.prepare("UPDATE content_strategies SET is_active = 1 WHERE version = ?").bind(version),
+  ]);
+}
+
+// ─── 选题扩展管理（D-06/D-07/D-08）─────────────────────
+
+type TopicUpdateInput = {
+  title?: string; angle?: string; reason?: string;
+  platform?: string; contentType?: string;
+  series?: string; seriesOrder?: number;
+  scheduledDate?: string | null; notes?: string;
+  platformDetail?: string; status?: "candidate" | "approved" | "skipped" | "scheduled" | "published";
+};
+
+export async function updateTopic(env: Env, id: number, input: TopicUpdateInput) {
+  await ensureSchema(env.DB);
+  const topic = await env.DB.prepare("SELECT id FROM topics WHERE id = ?").bind(id).first();
+  if (!topic) throw new Error("选题不存在");
+  const sets: string[] = [];
+  const binds: unknown[] = [];
+  const fieldMap: Record<string, string> = {
+    title: "title", angle: "angle", reason: "reason",
+    platform: "platform", contentType: "content_type",
+    series: "series", seriesOrder: "series_order",
+    scheduledDate: "scheduled_date", notes: "notes",
+    platformDetail: "platform_detail", status: "status",
+  };
+  for (const [key, col] of Object.entries(fieldMap)) {
+    const v = (input as Record<string, unknown>)[key];
+    if (v !== undefined) { sets.push(`${col} = ?`); binds.push(v); }
+  }
+  if (input.status === "scheduled" && !input.scheduledDate) {
+    throw new Error("排期状态必须提供 scheduled_date");
+  }
+  if (!sets.length) return;
+  sets.push("updated_at = ?"); binds.push(now());
+  binds.push(id);
+  await env.DB.prepare(`UPDATE topics SET ${sets.join(", ")} WHERE id = ?`).bind(...binds).run();
+}
+
+export async function publishTopic(env: Env, id: number, input: {
+  url: string; publishedDate?: string;
+  reads?: number; likes?: number; collects?: number; shares?: number;
+}) {
+  await ensureSchema(env.DB);
+  const topic = await env.DB.prepare("SELECT id FROM topics WHERE id = ?").bind(id).first();
+  if (!topic) throw new Error("选题不存在");
+  const metrics = {
+    reads: input.reads ?? 0, likes: input.likes ?? 0,
+    collects: input.collects ?? 0, shares: input.shares ?? 0,
+  };
+  await env.DB.prepare("UPDATE topics SET status = 'published', published_url = ?, published_date = ?, metrics = ?, updated_at = ? WHERE id = ?")
+    .bind(input.url, input.publishedDate || now().slice(0, 10), JSON.stringify(metrics), now(), id).run();
+}
+
+export async function checkScheduleConflict(env: Env, date: string, excludeId: number): Promise<string | null> {
+  await ensureSchema(env.DB);
+  const conflict = await env.DB.prepare(
+    "SELECT id, title FROM topics WHERE scheduled_date = ? AND platform IN ('gzh', 'wechat_gzh') AND status = 'scheduled' AND id != ?"
+  ).bind(date, excludeId).first<{ id: number; title: string }>();
+  return conflict ? conflict.title : null;
+}
+
+export async function listSeries(env: Env) {
+  await ensureSchema(env.DB);
+  const rows = await env.DB.prepare(
+    "SELECT series, COUNT(*) AS count, MIN(series_order) AS minOrder, MAX(series_order) AS maxOrder FROM topics WHERE series IS NOT NULL AND series != '' GROUP BY series ORDER BY count DESC"
+  ).all();
+  return rows.results;
+}
+
+export async function listSeriesTopics(env: Env, seriesName: string) {
+  await ensureSchema(env.DB);
+  const rows = await env.DB.prepare(
+    "SELECT id, title, angle, platform, status, series_order AS seriesOrder, scheduled_date AS scheduledDate, published_date AS publishedDate, published_url AS publishedUrl FROM topics WHERE series = ? ORDER BY series_order ASC, id ASC"
+  ).bind(seriesName).all();
+  return rows.results;
+}
+
+export async function listScheduledTopics(env: Env, fromDate: string, toDate: string) {
+  await ensureSchema(env.DB);
+  const rows = await env.DB.prepare(
+    "SELECT id, title, platform, series, scheduled_date AS scheduledDate, status FROM topics WHERE scheduled_date BETWEEN ? AND ? ORDER BY scheduled_date ASC, id ASC"
+  ).bind(fromDate, toDate).all();
+  return rows.results;
+}
+
+// ─── 复盘记录管理（D-18 单独建表 + 版本管理）──────────────
+
+type RetrospectiveInput = {
+  date: string; title: string; problem: string; result: string; lesson: string;
+  relatedSeries?: string; relatedTopicIds?: number[];
+};
+
+export async function listRetrospectives(env: Env, includeHistory = false) {
+  await ensureSchema(env.DB);
+  const where = includeHistory ? "" : "WHERE is_active = 1";
+  const rows = await env.DB.prepare(
+    `SELECT id, date, title, problem, result, lesson, related_series AS relatedSeries,
+            related_topic_ids AS relatedTopicIds, version, is_active AS isActive,
+            supersedes_id AS supersedesId, created_at AS createdAt, updated_at AS updatedAt
+     FROM retrospectives ${where} ORDER BY date DESC, id DESC LIMIT 100`
+  ).all();
+  return rows.results;
+}
+
+export async function createRetrospective(env: Env, input: RetrospectiveInput) {
+  await ensureSchema(env.DB);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(input.date)) throw new Error("日期格式应为 YYYY-MM-DD");
+  if (!input.title.trim()) throw new Error("标题不能为空");
+  const ts = now();
+  const inserted = await env.DB.prepare(
+    `INSERT INTO retrospectives (date, title, problem, result, lesson, related_series, related_topic_ids, version, is_active, supersedes_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, 1, NULL, ?, ?)`
+  ).bind(input.date, input.title.trim(), input.problem, input.result, input.lesson,
+    input.relatedSeries || null, JSON.stringify(input.relatedTopicIds || []), ts, ts).run();
+  return { id: Number(inserted.meta.last_row_id), version: 1 };
+}
+
+export async function reviseRetrospective(env: Env, id: number, input: Partial<RetrospectiveInput>) {
+  await ensureSchema(env.DB);
+  const old = await env.DB.prepare("SELECT * FROM retrospectives WHERE id = ? AND is_active = 1").bind(id).first<Record<string, unknown>>();
+  if (!old) throw new Error("复盘不存在或已是历史版本");
+  const ts = now();
+  const newVersion = Number(old.version) + 1;
+  const merged = {
+    date: input.date ?? String(old.date),
+    title: input.title ?? String(old.title),
+    problem: input.problem ?? String(old.problem),
+    result: input.result ?? String(old.result),
+    lesson: input.lesson ?? String(old.lesson),
+    related_series: input.relatedSeries !== undefined ? input.relatedSeries : old.related_series,
+    related_topic_ids: input.relatedTopicIds !== undefined ? JSON.stringify(input.relatedTopicIds) : old.related_topic_ids,
+  };
+  await env.DB.batch([
+    env.DB.prepare("UPDATE retrospectives SET is_active = 0, updated_at = ? WHERE id = ?").bind(ts, id),
+    env.DB.prepare(
+      `INSERT INTO retrospectives (date, title, problem, result, lesson, related_series, related_topic_ids, version, is_active, supersedes_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`
+    ).bind(merged.date, merged.title, merged.problem, merged.result, merged.lesson,
+      merged.related_series, merged.related_topic_ids, newVersion, id, ts, ts),
+  ]);
+  return { version: newVersion };
+}
+
+export async function getRetrospectiveHistory(env: Env, title: string) {
+  await ensureSchema(env.DB);
+  const rows = await env.DB.prepare(
+    `SELECT id, version, is_active AS isActive, supersedes_id AS supersedesId,
+            problem, result, lesson, created_at AS createdAt, updated_at AS updatedAt
+     FROM retrospectives WHERE title = ? ORDER BY version DESC`
+  ).bind(title).all();
+  return rows.results;
+}

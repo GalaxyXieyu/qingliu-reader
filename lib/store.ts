@@ -7,7 +7,7 @@ import { readXArticles, readXPost, readXProfile, xPostAddress, xProfileAddress }
 export type AppEnv = { DB: D1Database; AI?: { run: (model: string, input: unknown) => Promise<unknown> } };
 const now = () => new Date().toISOString();
 const day = () => new Date().toISOString().slice(0, 10);
-const SCHEMA_VERSION = "2026-07-17.4";
+const SCHEMA_VERSION = "2026-07-20.1";
 const schemaReady = new WeakMap<object, Promise<void>>();
 
 async function initializeSchema(db: D1Database) {
@@ -50,6 +50,13 @@ async function initializeSchema(db: D1Database) {
     db.prepare("CREATE INDEX IF NOT EXISTS profile_likes_profile_idx ON profile_likes(profile_user_id, created_at DESC)"),
     db.prepare("CREATE INDEX IF NOT EXISTS profile_messages_profile_idx ON profile_messages(profile_user_id, created_at DESC)"),
     db.prepare("CREATE INDEX IF NOT EXISTS notifications_user_idx ON notifications(user_id, is_read, created_at DESC)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS content_strategies (id INTEGER PRIMARY KEY AUTOINCREMENT, version INTEGER NOT NULL, content TEXT NOT NULL, note TEXT, is_active INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS retrospectives (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, title TEXT NOT NULL, problem TEXT NOT NULL, result TEXT NOT NULL, lesson TEXT NOT NULL, related_series TEXT, related_topic_ids TEXT NOT NULL DEFAULT '[]', version INTEGER NOT NULL DEFAULT 1, is_active INTEGER NOT NULL DEFAULT 1, supersedes_id INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS topics_series_idx ON topics(series, series_order)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS topics_scheduled_idx ON topics(scheduled_date) WHERE scheduled_date IS NOT NULL"),
+    db.prepare("CREATE INDEX IF NOT EXISTS content_strategies_active_idx ON content_strategies(is_active, version DESC)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS retrospectives_active_idx ON retrospectives(is_active, date DESC)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS retrospectives_title_idx ON retrospectives(title, version DESC)"),
   ]);
   const legacyFollowCleanupKey = "legacy_source_follow_seed_cleanup_v1";
   const legacyFollowCleanup = await db.prepare("SELECT value FROM app_meta WHERE key = ?").bind(legacyFollowCleanupKey).first<{ value: string }>();
@@ -80,6 +87,28 @@ async function initializeSchema(db: D1Database) {
   if (!requestColumns.results.some((column) => column.name === "result_name")) await db.prepare("ALTER TABLE subscription_requests ADD COLUMN result_name TEXT").run();
   if (!requestColumns.results.some((column) => column.name === "item_count")) await db.prepare("ALTER TABLE subscription_requests ADD COLUMN item_count INTEGER NOT NULL DEFAULT 0").run();
   if (!requestColumns.results.some((column) => column.name === "requester_user_id")) await db.prepare("ALTER TABLE subscription_requests ADD COLUMN requester_user_id INTEGER REFERENCES users(id)").run();
+  // topics 表扩展列（幂等 ALTER）
+  const topicColumns = await db.prepare("PRAGMA table_info(topics)").all<{ name: string }>();
+  const topicExisting = new Set(topicColumns.results.map((c) => c.name));
+  const topicNewCols: Array<[string, string]> = [
+    ["series", "TEXT"],
+    ["series_order", "INTEGER"],
+    ["scheduled_date", "TEXT"],
+    ["published_date", "TEXT"],
+    ["published_url", "TEXT"],
+    ["notes", "TEXT"],
+    ["platform_detail", "TEXT"],
+    ["metrics", "TEXT"],
+  ];
+  for (const [name, type] of topicNewCols) {
+    if (!topicExisting.has(name)) {
+      await db.prepare(`ALTER TABLE topics ADD COLUMN ${name} ${type}`).run();
+    }
+  }
+
+  // 种子复盘数据（首次启动）
+  await seedRetrospectives(db);
+
   await backfillSourceCategories(db);
   await db.prepare("INSERT INTO app_meta (key, value, updated_at) VALUES ('schema_version', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
     .bind(SCHEMA_VERSION, now()).run();
@@ -105,6 +134,20 @@ export async function ensureSchema(db: D1Database) {
   });
   schemaReady.set(key, pending);
   return pending;
+}
+
+async function seedRetrospectives(db: D1Database) {
+  const count = await db.prepare("SELECT COUNT(*) AS c FROM retrospectives").first<{ c: number }>();
+  if (Number(count?.c || 0) > 0) return;
+  const ts = now();
+  await db.prepare(
+    `INSERT INTO retrospectives (date, title, problem, result, lesson, related_series, related_topic_ids, version, is_active, created_at, updated_at)
+     VALUES ('2026-07-10', 'LangGraph 系列事故',
+       '7月10日单天发了4篇，互相争夺推荐位；每篇文章末尾没有导航到其他篇的链接；系列没有大纲导读作为入口',
+       '系列阅读量悬崖式下跌（109→43→38→26→24→16→10）',
+       '系列连载 ≠ 批量发布。合集效果靠的是交叉引流，不是堆数量。后续：单日≤1篇 + 第0篇大纲导读 + 每篇footer导航',
+       'LangGraph实战', '[]', 1, 1, ?, ?)`,
+  ).bind(ts, ts).run();
 }
 
 async function backfillSourceCategories(db: D1Database) {

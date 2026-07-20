@@ -90,6 +90,31 @@ export const apiTokens = sqliteTable("api_tokens", {
   lastUsedAt: text("last_used_at"),
 });
 
+export const contentStrategies = sqliteTable("content_strategies", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  version: integer("version").notNull(),
+  content: text("content").notNull(),
+  note: text("note"),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(false),
+  createdAt: text("created_at").notNull(),
+});
+
+export const retrospectives = sqliteTable("retrospectives", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  date: text("date").notNull(),
+  title: text("title").notNull(),
+  problem: text("problem").notNull(),
+  result: text("result").notNull(),
+  lesson: text("lesson").notNull(),
+  relatedSeries: text("related_series"),
+  relatedTopicIds: text("related_topic_ids").notNull().default("[]"),
+  version: integer("version").notNull().default(1),
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  supersedesId: integer("supersedes_id"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
 export const ideas = sqliteTable("ideas", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   day: text("day").notNull().unique(),

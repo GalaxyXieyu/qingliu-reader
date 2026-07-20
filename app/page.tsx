@@ -17,9 +17,11 @@ import {
   ChartBar,
   ChatText,
   CircleNotch,
+  ClipboardText,
   ClockCountdown,
   CornersIn,
   CornersOut,
+  Gear,
   Heart,
   LockKey,
   Key,
@@ -1639,6 +1641,8 @@ export function DeskApp({ initialView = "today" }: { initialView?: DeskView }) {
         <button className={view === "discover" ? "active" : ""} aria-current={view === "discover" ? "page" : undefined} onClick={() => navigate("discover")}><MagnifyingGlass size={16} />发现来源</button>
         <button className={view === "annotations" ? "active" : ""} aria-current={view === "annotations" ? "page" : undefined} onClick={() => navigate("annotations")}><ChatText size={16} weight="duotone" />批注广场</button>
         <button className={view === "leaderboard" ? "active" : ""} aria-current={view === "leaderboard" ? "page" : undefined} onClick={() => navigate("leaderboard")}><Trophy size={16} />排行榜</button>
+        <a className="nav-link" href="/topics"><ClipboardText size={16} weight="duotone" />选题</a>
+        <a className="nav-link" href="/strategy"><Gear size={16} weight="duotone" />策略</a>
       </nav>
       {data.user
         ? <div className="global-user-wrap">

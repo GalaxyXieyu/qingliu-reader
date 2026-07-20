@@ -54,6 +54,9 @@ button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible 
 .global-appbar nav { padding:3px; display:flex; gap:2px; background:var(--canvas); border-radius:var(--r-sm); }
 .global-appbar nav button { min-height:36px; padding:0 12px; display:flex; align-items:center; gap:6px; color:var(--muted); background:transparent; border:0; border-radius:var(--r-xs); font-size:11px; font-weight:700; white-space:nowrap; transition:transform 130ms var(--ease-out),background-color 150ms ease,color 150ms ease; }
 .global-appbar nav button.active { color:var(--green); background:var(--paper); box-shadow:var(--shadow-1); }
+.global-appbar nav a.nav-link { min-height:36px; padding:0 12px; display:flex; align-items:center; gap:6px; color:var(--muted); background:transparent; border-radius:var(--r-xs); font-size:11px; font-weight:700; white-space:nowrap; transition:transform 130ms var(--ease-out),background-color 150ms ease,color 150ms ease; }
+.global-appbar nav a.nav-link:hover { color:var(--green); background:var(--paper); box-shadow:var(--shadow-1); }
+.global-appbar nav a.nav-link:active { transform:scale(.97); }
 .global-user-wrap { position:relative; justify-self:end; display:flex; align-items:center; gap:2px; }
 .global-user,.global-login { min-height:42px; padding:0 8px; display:flex; align-items:center; gap:8px; color:var(--ink); background:transparent; border:0; border-radius:var(--r-sm); font-size:11px; font-weight:700; white-space:nowrap; transition:transform 130ms var(--ease-out),background-color 150ms ease; }
 .global-user.active { color:var(--green); background:var(--green-soft); }
