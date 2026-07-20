@@ -52,8 +52,6 @@ async function initializeSchema(db: D1Database) {
     db.prepare("CREATE INDEX IF NOT EXISTS notifications_user_idx ON notifications(user_id, is_read, created_at DESC)"),
     db.prepare("CREATE TABLE IF NOT EXISTS content_strategies (id INTEGER PRIMARY KEY AUTOINCREMENT, version INTEGER NOT NULL, content TEXT NOT NULL, note TEXT, is_active INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)"),
     db.prepare("CREATE TABLE IF NOT EXISTS retrospectives (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, title TEXT NOT NULL, problem TEXT NOT NULL, result TEXT NOT NULL, lesson TEXT NOT NULL, related_series TEXT, related_topic_ids TEXT NOT NULL DEFAULT '[]', version INTEGER NOT NULL DEFAULT 1, is_active INTEGER NOT NULL DEFAULT 1, supersedes_id INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"),
-    db.prepare("CREATE INDEX IF NOT EXISTS topics_series_idx ON topics(series, series_order)"),
-    db.prepare("CREATE INDEX IF NOT EXISTS topics_scheduled_idx ON topics(scheduled_date) WHERE scheduled_date IS NOT NULL"),
     db.prepare("CREATE INDEX IF NOT EXISTS content_strategies_active_idx ON content_strategies(is_active, version DESC)"),
     db.prepare("CREATE INDEX IF NOT EXISTS retrospectives_active_idx ON retrospectives(is_active, date DESC)"),
     db.prepare("CREATE INDEX IF NOT EXISTS retrospectives_title_idx ON retrospectives(title, version DESC)"),
@@ -105,6 +103,11 @@ async function initializeSchema(db: D1Database) {
       await db.prepare(`ALTER TABLE topics ADD COLUMN ${name} ${type}`).run();
     }
   }
+  // topics 扩展列的索引（必须在 ALTER 之后建）
+  await db.batch([
+    db.prepare("CREATE INDEX IF NOT EXISTS topics_series_idx ON topics(series, series_order)"),
+    db.prepare("CREATE INDEX IF NOT EXISTS topics_scheduled_idx ON topics(scheduled_date) WHERE scheduled_date IS NOT NULL"),
+  ]);
 
   // 种子复盘数据（首次启动）
   await seedRetrospectives(db);
